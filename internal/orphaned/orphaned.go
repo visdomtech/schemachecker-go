@@ -23,7 +23,7 @@ func FromIndex(indexFile string) error {
 
 	// Collect referenced files from index (non-comment, non-blank lines)
 	referenced := make(map[string]bool)
-	for _, line := range strings.Split(content, "\n") {
+	for _, line := range strings.Split(strings.TrimSuffix(content, "\n"), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
 			continue

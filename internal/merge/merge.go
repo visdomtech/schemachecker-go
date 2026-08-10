@@ -27,7 +27,7 @@ func FromIndex(indexFile, migrationFile string) error {
 	}
 	defer out.Close()
 
-	for _, line := range strings.Split(content, "\n") {
+	for _, line := range strings.Split(strings.TrimSuffix(content, "\n"), "\n") {
 		if strings.HasPrefix(line, "--") {
 			fmt.Fprintln(out, line)
 		} else if strings.TrimSpace(line) == "" {

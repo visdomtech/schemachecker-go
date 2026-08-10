@@ -145,8 +145,8 @@ func (d *FileTreeDiffer) diffFile(file string) (*Delta, error) {
 		return nil, err
 	}
 
-	text1 := filterLines(strings.Split(leftContent, "\n"), d.IgnorePatterns)
-	text2 := filterLines(strings.Split(rightContent, "\n"), d.IgnorePatterns)
+	text1 := filterLines(splitLines(leftContent), d.IgnorePatterns)
+	text2 := filterLines(splitLines(rightContent), d.IgnorePatterns)
 
 	// Normalize PSQL meta commands for comparison: replace args with canonical form.
 	// This ensures that lines like `\restrict foo` and `\restrict bar` are treated as equal.
@@ -249,6 +249,12 @@ func toSet(slice []string) map[string]bool {
 	return m
 }
 
+// splitLines splits content on newlines, stripping a trailing newline to avoid
+// a spurious empty element (matching Java's .lines() behavior).
+func splitLines(content string) []string {
+	return strings.Split(strings.TrimSuffix(content, "\n"), "\n")
+}
+
 // DiffFiles compares two files and returns a unified diff string.
 // This is used by the validate command for comparing dump files.
 func DiffFiles(file1, file2, label1, label2 string) (string, bool, error) {
@@ -261,8 +267,8 @@ func DiffFiles(file1, file2, label1, label2 string) (string, bool, error) {
 		return "", false, err
 	}
 
-	text1 := strings.Split(content1, "\n")
-	text2 := strings.Split(content2, "\n")
+	text1 := splitLines(content1)
+	text2 := splitLines(content2)
 
 	ud := difflib.UnifiedDiff{
 		A:        text1,
