@@ -817,3 +817,65 @@ func TestMergeInlineSequenceDefaultInTableFile(t *testing.T) {
 		t.Error("SEQUENCE file should be removed after inlining")
 	}
 }
+
+func TestMergeInlineIdentitySequence(t *testing.T) {
+	// PostgreSQL IDENTITY columns (GENERATED ALWAYS AS IDENTITY) are emitted
+	// by pg_dump as separate SEQUENCE objects. The merge should convert them
+	// to bigserial and remove the SEQUENCE file.
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"orca/TABLE", "orca/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"orca/TABLE/policy_drafts.sql": strings.Join([]string{
+			"CREATE TABLE orca.policy_drafts (",
+			"    draft_id bigint NOT NULL,",
+			"    workspace_id text NOT NULL,",
+			"    title text DEFAULT ''::text NOT NULL",
+			");",
+			"",
+			"ALTER TABLE orca.policy_drafts OWNER TO test;",
+			"ALTER TABLE ONLY orca.policy_drafts",
+			"    ADD CONSTRAINT policy_drafts_pkey PRIMARY KEY (draft_id);",
+		}, "\n") + "\n",
+		"orca/SEQUENCE/policy_drafts_draft_id_seq.sql": strings.Join([]string{
+			"ALTER TABLE orca.policy_drafts ALTER COLUMN draft_id ADD GENERATED ALWAYS AS IDENTITY (",
+			"SEQUENCE NAME orca.policy_drafts_draft_id_seq",
+			"    START WITH 1",
+			"    INCREMENT BY 1",
+			"    NO MINVALUE",
+			"    NO MAXVALUE",
+			"    CACHE 1",
+			");",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE file should have bigserial
+	data, err := os.ReadFile(filepath.Join(destDir, "orca/TABLE/policy_drafts.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(data)
+	if !strings.Contains(sql, "bigserial") {
+		t.Errorf("draft_id should be bigserial, got:\n%s", sql)
+	}
+
+	// SEQUENCE file should be removed
+	if _, err := os.Stat(filepath.Join(destDir, "orca/SEQUENCE/policy_drafts_draft_id_seq.sql")); !os.IsNotExist(err) {
+		t.Error("IDENTITY SEQUENCE file should be removed after inlining")
+	}
+}

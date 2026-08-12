@@ -174,6 +174,9 @@ var reOwnedBy = regexp.MustCompile(`(?i)OWNED\s+BY\s+([\w."]+)`)
 // reSeqNonStandard matches lines inside a CREATE SEQUENCE definition.
 var reSeqNonStandard = regexp.MustCompile(`(?i)(CYCLE|MINVALUE\s+\d|MAXVALUE\s+\d)`)
 
+// reIdentitySeq matches ALTER TABLE [schema.]table ALTER COLUMN col ADD GENERATED ALWAYS AS IDENTITY
+var reIdentitySeq = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+([\w."]+)\s+ALTER\s+COLUMN\s+(\w+)\s+ADD\s+GENERATED\s+ALWAYS\s+AS\s+IDENTITY`)
+
 // inlineSequences scans SEQUENCE/ for table-owned standard sequences, converts
 // the owning table's column to BIGSERIAL, removes the nextval DEFAULT, and
 // removes the SEQUENCE file.
@@ -195,8 +198,11 @@ func inlineSequences(destDir, schemaName string) error {
 		}
 		content := string(data)
 
-		// Parse OWNED BY to find the table and column.
+		// Try OWNED BY first, then IDENTITY pattern.
 		tableName, columnName := parseSequenceOwnedBy(content)
+		if tableName == "" {
+			tableName, columnName = parseIdentitySequence(content)
+		}
 		if tableName == "" {
 			continue // standalone sequence
 		}
@@ -246,6 +252,25 @@ func parseSequenceOwnedBy(content string) (table, column string) {
 		return parts[1], parts[2]
 	case 2: // table.column
 		return parts[0], parts[1]
+	default:
+		return "", ""
+	}
+}
+
+// parseIdentitySequence extracts table and column from
+// ALTER TABLE [schema.]table ALTER COLUMN col ADD GENERATED ALWAYS AS IDENTITY
+func parseIdentitySequence(content string) (table, column string) {
+	match := reIdentitySeq.FindStringSubmatch(content)
+	if match == nil {
+		return "", ""
+	}
+	ref := match[1]
+	parts := strings.Split(ref, ".")
+	switch len(parts) {
+	case 2: // schema.table
+		return parts[1], match[2]
+	case 1: // table
+		return parts[0], match[2]
 	default:
 		return "", ""
 	}
