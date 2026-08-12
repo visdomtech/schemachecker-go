@@ -756,3 +756,64 @@ func TestMergeInlineSequenceBigint(t *testing.T) {
 		t.Errorf("bigint column should be converted to bigserial, got:\n%s", string(ordersData))
 	}
 }
+
+func TestMergeInlineSequenceDefaultInTableFile(t *testing.T) {
+	// Reproduces the real pg_dump case where the nextval DEFAULT and
+	// constraints are already inside the TABLE file (not a separate DEFAULT/ file).
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"approval/TABLE", "approval/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"approval/TABLE/instances.sql": strings.Join([]string{
+			"CREATE TABLE approval.instances (",
+			"    instance_id bigint NOT NULL,",
+			"    workspace_id text NOT NULL",
+			");",
+			"",
+			"ALTER TABLE ONLY approval.instances ALTER COLUMN instance_id SET DEFAULT nextval('approval.instances_instance_id_seq'::regclass);",
+		}, "\n") + "\n",
+		"approval/SEQUENCE/instances_instance_id_seq.sql": strings.Join([]string{
+			"CREATE SEQUENCE approval.instances_instance_id_seq",
+			"    START WITH 1",
+			"    INCREMENT BY 1",
+			"    NO MINVALUE",
+			"    NO MAXVALUE",
+			"    CACHE 1;",
+			"",
+			"ALTER SEQUENCE approval.instances_instance_id_seq OWNED BY approval.instances.instance_id;",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE file should have bigserial and no nextval
+	data, err := os.ReadFile(filepath.Join(destDir, "approval/TABLE/instances.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(data)
+	if !strings.Contains(sql, "bigserial") {
+		t.Errorf("instance_id should be bigserial, got:\n%s", sql)
+	}
+	if strings.Contains(sql, "nextval") {
+		t.Errorf("nextval DEFAULT should be removed from TABLE file, got:\n%s", sql)
+	}
+
+	// SEQUENCE file should be removed
+	if _, err := os.Stat(filepath.Join(destDir, "approval/SEQUENCE/instances_instance_id_seq.sql")); !os.IsNotExist(err) {
+		t.Error("SEQUENCE file should be removed after inlining")
+	}
+}

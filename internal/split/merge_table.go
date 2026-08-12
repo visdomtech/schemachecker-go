@@ -212,9 +212,15 @@ func inlineSequences(destDir, schemaName string) error {
 			return err
 		}
 
-		// Remove the nextval default from the DEFAULT file.
+		// Remove the nextval default from the DEFAULT file (if separate).
 		defaultPath := filepath.Join(destDir, schemaName, "DEFAULT", tableName+".sql")
 		if err := removeDefaultNextval(defaultPath, columnName); err != nil {
+			return err
+		}
+
+		// Also remove the nextval default from the TABLE file itself,
+		// since pg_dump may emit it inline after the CREATE TABLE.
+		if err := removeDefaultNextval(tablePath, columnName); err != nil {
 			return err
 		}
 
