@@ -61,7 +61,17 @@ func DumpFromPool(ctx context.Context, pool *pgxpool.Pool, opts Options) error {
 	}
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", password))
+	// Use minimal environment to avoid leaking parent secrets to child process.
+	cmd.Env = []string{
+		fmt.Sprintf("PGPASSWORD=%s", password),
+		"PATH=" + os.Getenv("PATH"),
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		cmd.Env = append(cmd.Env, "HOME="+home)
+	}
+	if tz := os.Getenv("TZ"); tz != "" {
+		cmd.Env = append(cmd.Env, "TZ="+tz)
+	}
 	cmd.Stdout = outFile
 
 	var stderr bytes.Buffer

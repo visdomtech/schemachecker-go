@@ -879,3 +879,189 @@ func TestMergeInlineIdentitySequence(t *testing.T) {
 		t.Error("IDENTITY SEQUENCE file should be removed after inlining")
 	}
 }
+
+func TestMergeInlineSequenceTableMissing(t *testing.T) {
+	// When the TABLE file doesn't exist, the SEQUENCE file should be preserved
+	// (not silently deleted).
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	if err := os.MkdirAll(filepath.Join(destDir, "public/SEQUENCE"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Note: no TABLE directory, so no table file exists.
+
+	seqContent := strings.Join([]string{
+		"CREATE SEQUENCE public.orphan_seq",
+		"    START WITH 1",
+		"    INCREMENT BY 1",
+		"    NO MINVALUE",
+		"    NO MAXVALUE",
+		"    CACHE 1;",
+		"",
+		"ALTER SEQUENCE public.orphan_seq OWNED BY public.missing_table.id;",
+	}, "\n") + "\n"
+
+	if err := os.WriteFile(filepath.Join(destDir, "public/SEQUENCE/orphan_seq.sql"), []byte(seqContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// SEQUENCE file should be preserved when TABLE is missing.
+	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/orphan_seq.sql")); os.IsNotExist(err) {
+		t.Error("SEQUENCE file should be preserved when TABLE file is missing")
+	}
+}
+
+func TestMergeInlineSequenceQuotedIdentifiers(t *testing.T) {
+	// pg_dump may emit quoted identifiers in OWNED BY.
+	// The inliner should strip quotes and still match files.
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"public/TABLE", "public/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"public/TABLE/users.sql": "CREATE TABLE public.users (\n    id integer NOT NULL\n);\n",
+		"public/SEQUENCE/users_id_seq.sql": strings.Join([]string{
+			"ALTER SEQUENCE public.users_id_seq OWNED BY \"public\".\"users\".\"id\";",
+			"",
+			"CREATE SEQUENCE public.users_id_seq",
+			"    START WITH 1",
+			"    INCREMENT BY 1",
+			"    NO MINVALUE",
+			"    NO MAXVALUE",
+			"    CACHE 1;",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE file should have bigserial.
+	data, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/users.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "bigserial") {
+		t.Errorf("id should be bigserial with quoted identifiers, got:\n%s", string(data))
+	}
+
+	// SEQUENCE file should be removed.
+	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/users_id_seq.sql")); !os.IsNotExist(err) {
+		t.Error("SEQUENCE file should be removed even with quoted identifiers")
+	}
+}
+
+func TestMergeInlineSequenceNoCycleIsStandard(t *testing.T) {
+	// pg_dump emits "NO CYCLE" for standard sequences.
+	// The inliner should treat these as standard (inlineable).
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"public/TABLE", "public/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"public/TABLE/events.sql": "CREATE TABLE public.events (\n    id bigint NOT NULL\n);\n",
+		"public/SEQUENCE/events_id_seq.sql": strings.Join([]string{
+			"CREATE SEQUENCE public.events_id_seq",
+			"    START WITH 1",
+			"    INCREMENT BY 1",
+			"    NO MINVALUE",
+			"    NO MAXVALUE",
+			"    NO CYCLE",
+			"    CACHE 1;",
+			"",
+			"ALTER SEQUENCE public.events_id_seq OWNED BY public.events.id;",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE file should have bigserial (NO CYCLE is standard).
+	data, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/events.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "bigserial") {
+		t.Errorf("id should be bigserial when sequence has NO CYCLE, got:\n%s", string(data))
+	}
+
+	// SEQUENCE file should be removed.
+	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/events_id_seq.sql")); !os.IsNotExist(err) {
+		t.Error("SEQUENCE with NO CYCLE should be inlined and removed")
+	}
+}
+
+func TestMergeInlineSequenceNegativeMinvalue(t *testing.T) {
+	// A sequence with MINVALUE -1 is non-standard and should NOT be inlined.
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"public/TABLE", "public/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"public/TABLE/temps.sql": "CREATE TABLE public.temps (\n    id integer NOT NULL\n);\n",
+		"public/SEQUENCE/temps_id_seq.sql": strings.Join([]string{
+			"CREATE SEQUENCE public.temps_id_seq",
+			"    START WITH -10",
+			"    INCREMENT BY 1",
+			"    MINVALUE -10",
+			"    NO MAXVALUE",
+			"    CACHE 1;",
+			"",
+			"ALTER SEQUENCE public.temps_id_seq OWNED BY public.temps.id;",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE file should NOT have bigserial (non-standard MINVALUE -10).
+	data, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/temps.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "bigserial") {
+		t.Errorf("id should NOT be bigserial with negative MINVALUE, got:\n%s", string(data))
+	}
+
+	// SEQUENCE file should be preserved.
+	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/temps_id_seq.sql")); os.IsNotExist(err) {
+		t.Error("SEQUENCE with negative MINVALUE should be preserved")
+	}
+}

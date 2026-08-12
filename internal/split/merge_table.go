@@ -2,7 +2,9 @@ package split
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,13 +24,20 @@ var contentMergeTypes = []string{"INDEX", "TRIGGER"}
 // appends the SQL from INDEX, TRIGGER, DEFAULT, CONSTRAINT, and FK_CONSTRAINT
 // files into the table's TABLE/*.sql file, then removes the now-empty
 // directories.
+//
+// Note: this operation is NOT idempotent. Re-running on a partially-merged
+// directory may duplicate appended content. Always split into a fresh directory.
 func MergeTableObjects(destDir string) error {
+	slog.Info("merging table objects", "destDir", destDir)
+
 	// Find all schema directories (anything containing a TABLE/ subdirectory).
 	entries, err := os.ReadDir(destDir)
 	if err != nil {
 		return fmt.Errorf("read dest dir: %w", err)
 	}
 
+	var errs []error
+	schemaCount := 0
 	for _, schemaEntry := range entries {
 		if !schemaEntry.IsDir() {
 			continue
@@ -39,21 +48,32 @@ func MergeTableObjects(destDir string) error {
 			continue
 		}
 
+		schemaCount++
+
 		// Inline standard table-owned sequences as BIGSERIAL before other merges.
+		// This must run before mergeSchemaTables so that removeDefaultNextval
+		// cleans DEFAULT files before they are appended to TABLE files.
 		if err := inlineSequences(destDir, schemaName); err != nil {
-			return err
+			slog.Error("failed to inline sequences", "schema", schemaName, "error", err)
+			errs = append(errs, fmt.Errorf("inline sequences for %s: %w", schemaName, err))
+			continue
 		}
 
 		if err := mergeSchemaTables(destDir, schemaName, tableDir); err != nil {
-			return err
+			slog.Error("failed to merge schema tables", "schema", schemaName, "error", err)
+			errs = append(errs, fmt.Errorf("merge %s: %w", schemaName, err))
 		}
 	}
 
-	// Remove directories left empty after merging.
+	// Always run cleanup even if some schemas failed.
 	removeEmptyDirs(destDir)
 
-	// Update index.txt to reflect merged files.
-	return updateIndexAfterMerge(destDir)
+	if idxErr := updateIndexAfterMerge(destDir); idxErr != nil {
+		errs = append(errs, fmt.Errorf("update index: %w", idxErr))
+	}
+
+	slog.Info("merge complete", "schemas_processed", schemaCount)
+	return errors.Join(errs...)
 }
 
 // mergeSchemaTables merges table-associated objects for all tables in one schema.
@@ -99,7 +119,10 @@ var reOnTable = regexp.MustCompile(`(?i)ON\s+([\w.]+)\s*[\s(;,]`)
 func mergeByContent(tablePath, objDir, schemaName, tableName string) error {
 	entries, err := os.ReadDir(objDir)
 	if err != nil {
-		return nil // directory may not exist
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", objDir, err)
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
@@ -141,7 +164,7 @@ func appendIfExists(dstPath, srcPath string) error {
 		return nil
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("read %s: %w", srcPath, err)
 	}
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return os.Remove(srcPath)
@@ -158,21 +181,23 @@ func appendContent(dstPath string, content []byte) error {
 	if err != nil {
 		return fmt.Errorf("open table file: %w", err)
 	}
-	defer f.Close()
-
-	// Blank line separator
 	if _, err := fmt.Fprintln(f); err != nil {
+		f.Close()
 		return err
 	}
-	_, err = f.Write(content)
-	return err
+	if _, err := f.Write(content); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // reOwnedBy matches ALTER SEQUENCE ... OWNED BY [schema.]table.column;
 var reOwnedBy = regexp.MustCompile(`(?i)OWNED\s+BY\s+([\w."]+)`)
 
-// reSeqNonStandard matches lines inside a CREATE SEQUENCE definition.
-var reSeqNonStandard = regexp.MustCompile(`(?i)(CYCLE|MINVALUE\s+\d|MAXVALUE\s+\d)`)
+// reSeqNonStandard matches non-standard CREATE SEQUENCE options.
+// Anchored to line start so "NO CYCLE" / "NO MINVALUE" don't false-match.
+var reSeqNonStandard = regexp.MustCompile(`(?im)^\s*(CYCLE|MINVALUE\s+-?\d|MAXVALUE\s+-?\d)`)
 
 // reIdentitySeq matches ALTER TABLE [schema.]table ALTER COLUMN col ADD GENERATED ALWAYS AS IDENTITY
 var reIdentitySeq = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+([\w."]+)\s+ALTER\s+COLUMN\s+(\w+)\s+ADD\s+GENERATED\s+ALWAYS\s+AS\s+IDENTITY`)
@@ -184,7 +209,10 @@ func inlineSequences(destDir, schemaName string) error {
 	seqDir := filepath.Join(destDir, schemaName, "SEQUENCE")
 	entries, err := os.ReadDir(seqDir)
 	if err != nil {
-		return nil // no SEQUENCE dir
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", seqDir, err)
 	}
 
 	for _, entry := range entries {
@@ -194,7 +222,7 @@ func inlineSequences(destDir, schemaName string) error {
 		seqPath := filepath.Join(seqDir, entry.Name())
 		data, err := os.ReadFile(seqPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("read %s: %w", seqPath, err)
 		}
 		content := string(data)
 
@@ -204,18 +232,27 @@ func inlineSequences(destDir, schemaName string) error {
 			tableName, columnName = parseIdentitySequence(content)
 		}
 		if tableName == "" {
+			slog.Debug("skipping standalone sequence", "schema", schemaName, "sequence", entry.Name())
 			continue // standalone sequence
 		}
 
 		// Only inline standard sequences (no CYCLE, no explicit MIN/MAX).
 		if !isStandardSequence(content) {
+			slog.Debug("skipping non-standard sequence", "schema", schemaName, "sequence", entry.Name())
 			continue
 		}
 
 		// Modify the TABLE file: replace column type with bigserial.
 		tablePath := filepath.Join(destDir, schemaName, "TABLE", tableName+".sql")
-		if err := inlineBigserial(tablePath, columnName); err != nil {
+		found, err := inlineBigserial(tablePath, columnName)
+		if err != nil {
 			return err
+		}
+		if !found {
+			slog.Warn("skipping sequence: table file not found",
+				"schema", schemaName, "table", tableName, "sequence", entry.Name(),
+				"expected_path", tablePath)
+			continue
 		}
 
 		// Remove the nextval default from the DEFAULT file (if separate).
@@ -231,11 +268,22 @@ func inlineSequences(destDir, schemaName string) error {
 		}
 
 		// Remove the SEQUENCE file.
-		if err := os.Remove(seqPath); err != nil {
-			return err
+		if err := os.Remove(seqPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", seqPath, err)
 		}
+
+		slog.Debug("inlined sequence as bigserial",
+			"schema", schemaName, "table", tableName, "column", columnName)
 	}
 	return nil
+}
+
+// stripQuotes removes surrounding double-quotes from a PostgreSQL identifier.
+func stripQuotes(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
 
 // parseSequenceOwnedBy extracts table and column names from an
@@ -247,6 +295,9 @@ func parseSequenceOwnedBy(content string) (table, column string) {
 	}
 	ref := match[1]
 	parts := strings.Split(ref, ".")
+	for i := range parts {
+		parts[i] = stripQuotes(parts[i])
+	}
 	switch len(parts) {
 	case 3: // schema.table.column
 		return parts[1], parts[2]
@@ -266,11 +317,14 @@ func parseIdentitySequence(content string) (table, column string) {
 	}
 	ref := match[1]
 	parts := strings.Split(ref, ".")
+	for i := range parts {
+		parts[i] = stripQuotes(parts[i])
+	}
 	switch len(parts) {
 	case 2: // schema.table
-		return parts[1], match[2]
+		return parts[1], stripQuotes(match[2])
 	case 1: // table
-		return parts[0], match[2]
+		return parts[0], stripQuotes(match[2])
 	default:
 		return "", ""
 	}
@@ -283,14 +337,16 @@ func isStandardSequence(content string) bool {
 }
 
 // inlineBigserial replaces the column's integer/bigint type with bigserial
-// in the TABLE file.
-func inlineBigserial(tablePath, columnName string) error {
+// in the TABLE file. Returns (true, nil) if the table file was found and
+// the column was converted, (false, nil) if the table file doesn't exist
+// or the column was not found, or (false, err) on I/O failure.
+func inlineBigserial(tablePath, columnName string) (found bool, err error) {
 	data, err := os.ReadFile(tablePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, fmt.Errorf("read %s: %w", tablePath, err)
 	}
 	content := string(data)
 
@@ -298,40 +354,50 @@ func inlineBigserial(tablePath, columnName string) error {
 	reCol := regexp.MustCompile(
 		`(?i)(` + regexp.QuoteMeta(columnName) + `\s+)(integer|bigint|int4|int8)(\s+NOT\s+NULL)`)
 	if !reCol.MatchString(content) {
-		return nil // column not found or already serial
+		return false, nil // column not found or already serial
 	}
 	newContent := reCol.ReplaceAllString(content, "${1}bigserial${3}")
-	return os.WriteFile(tablePath, []byte(newContent), 0o644)
+	if err := os.WriteFile(tablePath, []byte(newContent), 0o644); err != nil {
+		return false, fmt.Errorf("write %s: %w", tablePath, err)
+	}
+	return true, nil
 }
 
 // removeDefaultNextval removes the ALTER COLUMN ... SET DEFAULT nextval(...) line
-// for the given column from the DEFAULT file. If the file becomes empty, removes it.
-func removeDefaultNextval(defaultPath, columnName string) error {
-	data, err := os.ReadFile(defaultPath)
+// for the given column from the file at filePath.
+// If the file becomes empty after removal, deletes it.
+func removeDefaultNextval(filePath string, columnName string) error {
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("read %s: %w", filePath, err)
 	}
 
-	// Remove lines matching the nextval default for this column.
+	// Build a column-specific regex from the pre-compiled template.
 	reCol := regexp.MustCompile(
 		`(?i)ALTER\s+TABLE\s+(?:ONLY\s+)?[\w."]+\s+ALTER\s+COLUMN\s+` +
 			regexp.QuoteMeta(columnName) + `\s+SET\s+DEFAULT\s+nextval\([^)]*\)[^;]*;[ \t]*\n?`)
 	newContent := reCol.ReplaceAllLiteralString(string(data), "")
 
 	if len(strings.TrimSpace(newContent)) == 0 {
-		return os.Remove(defaultPath)
+		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", filePath, err)
+		}
+		return nil
 	}
-	return os.WriteFile(defaultPath, []byte(newContent), 0o644)
+	return os.WriteFile(filePath, []byte(newContent), 0o644)
 }
 
 // removeEmptyDirs walks destDir bottom-up and removes any empty directories.
 func removeEmptyDirs(destDir string) {
 	// Collect directories bottom-up so children are visited before parents.
 	var dirs []string
-	filepath.Walk(destDir, func(path string, info os.FileInfo, _ error) error {
+	filepath.Walk(destDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip inaccessible entries
+		}
 		if info.IsDir() && path != destDir {
 			dirs = append(dirs, path)
 		}
@@ -344,7 +410,9 @@ func removeEmptyDirs(destDir string) {
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
 		if err == nil && len(entries) == 0 {
-			os.Remove(dir)
+			if err := os.Remove(dir); err != nil {
+				slog.Debug("could not remove empty dir", "dir", dir, "error", err)
+			}
 		}
 	}
 }

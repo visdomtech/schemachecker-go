@@ -75,7 +75,9 @@ func Dump(dumpFile string, destDir string, opts Options) error {
 	}
 
 	if opts.Merge {
-		return MergeTableObjects(destDir)
+		if err := MergeTableObjects(destDir); err != nil {
+			return fmt.Errorf("merge post-processing failed (unmerged split still available at %s): %w", destDir, err)
+		}
 	}
 	return nil
 }
@@ -289,8 +291,14 @@ func (b *dumpBuffer) flushTo(newState state, newFilename, newHeaderComment strin
 		filePath := filepath.Join(b.destDir, b.filename)
 
 		// Path containment: ensure resolved path stays within destDir
-		absDest, _ := filepath.Abs(b.destDir)
-		absFile, _ := filepath.Abs(filePath)
+		absDest, err := filepath.Abs(b.destDir)
+		if err != nil {
+			return fmt.Errorf("resolve destDir abs path: %w", err)
+		}
+		absFile, err := filepath.Abs(filePath)
+		if err != nil {
+			return fmt.Errorf("resolve file abs path: %w", err)
+		}
 		if !strings.HasPrefix(absFile, absDest+string(os.PathSeparator)) {
 			fmt.Fprintf(os.Stderr, "warning: skipping file %q that escapes output directory\n", b.filename)
 			b.setNewState(newState, newFilename, newHeaderComment)
