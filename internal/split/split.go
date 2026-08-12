@@ -35,8 +35,15 @@ const (
 	stateSeqSet
 )
 
+// Options configures the split behavior.
+type Options struct {
+	// Merge inlines INDEX, TRIGGER, DEFAULT, CONSTRAINT, and FK_CONSTRAINT
+	// SQL into the corresponding TABLE file instead of creating separate files.
+	Merge bool
+}
+
 // Dump splits the pg_dump file at dumpFile into per-object SQL files under destDir.
-func Dump(dumpFile string, destDir string) error {
+func Dump(dumpFile string, destDir string, opts Options) error {
 	f, err := os.Open(dumpFile)
 	if err != nil {
 		return fmt.Errorf("open dump file: %w", err)
@@ -65,6 +72,10 @@ func Dump(dumpFile string, destDir string) error {
 	// flush final buffer
 	if err := buf.flushTo(stateEmpty, "", "-- flushing last buff at end of file"); err != nil {
 		return fmt.Errorf("final flush: %w", err)
+	}
+
+	if opts.Merge {
+		return MergeTableObjects(destDir)
 	}
 	return nil
 }

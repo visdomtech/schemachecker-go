@@ -191,7 +191,7 @@ func TestDumpBasic(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir); err != nil {
+	if err := Dump(dumpFile, destDir, Options{}); err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
 
@@ -264,7 +264,7 @@ func TestDumpCopyData(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir); err != nil {
+	if err := Dump(dumpFile, destDir, Options{}); err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
 
@@ -297,7 +297,7 @@ func TestDumpEmptyCopy(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir); err != nil {
+	if err := Dump(dumpFile, destDir, Options{}); err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
 
@@ -328,7 +328,7 @@ func TestDumpSeqSet(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir); err != nil {
+	if err := Dump(dumpFile, destDir, Options{}); err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
 
@@ -356,7 +356,7 @@ func TestDumpFilenameTruncation(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	err := Dump(dumpFile, destDir)
+	err := Dump(dumpFile, destDir, Options{})
 	if err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
@@ -373,5 +373,211 @@ func TestDumpFilenameTruncation(t *testing.T) {
 		if len(e.Name()) > 255 {
 			t.Errorf("filename %q exceeds 255 chars", e.Name())
 		}
+	}
+}
+
+func TestMergeTableObjects(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	// Create directory structure mimicking a split dump.
+	dirs := []string{
+		"public/TABLE",
+		"public/INDEX",
+		"public/TRIGGER",
+		"public/DEFAULT",
+		"public/FK_CONSTRAINT",
+		"public/CONSTRAINT",
+		"public/FUNCTION",
+	}
+	for _, d := range dirs {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		// TABLE files
+		"public/TABLE/users.sql":  "CREATE TABLE public.users (\n    id integer NOT NULL,\n    name text\n);\n",
+		"public/TABLE/orders.sql": "CREATE TABLE public.orders (\n    id integer NOT NULL,\n    user_id integer\n);\n",
+
+		// INDEX files: one named after table, one named after the index
+		"public/INDEX/users.sql":           "CREATE INDEX users_name_idx ON users(name);\n",
+		"public/INDEX/orders_user_id_idx.sql": "CREATE INDEX orders_user_id_idx ON public.orders(user_id);\n",
+
+		// TRIGGER files
+		"public/TRIGGER/users.sql": "CREATE TRIGGER users_audit AFTER UPDATE ON users FOR EACH ROW EXECUTE PROCEDURE audit();\n",
+
+		// DEFAULT files
+		"public/DEFAULT/orders.sql": "ALTER TABLE public.orders ALTER COLUMN id SET DEFAULT nextval('orders_id_seq');\n",
+
+		// FK_CONSTRAINT files
+		"public/FK_CONSTRAINT/orders.sql": "ALTER TABLE public.orders ADD CONSTRAINT orders_user_fkey FOREIGN KEY (user_id) REFERENCES users(id);\n",
+
+		// CONSTRAINT files
+		"public/CONSTRAINT/users.sql": "ALTER TABLE public.users ADD CONSTRAINT users_name_not_empty CHECK (name <> '');\n",
+
+		// FUNCTION files (should NOT be merged)
+		"public/FUNCTION/audit.sql": "CREATE FUNCTION audit() RETURNS trigger AS $$ BEGIN END $$ LANGUAGE plpgsql;\n",
+
+		// index.txt
+		"index.txt": strings.Join([]string{
+			"public/TABLE/users.sql",
+			"public/TABLE/orders.sql",
+			"public/INDEX/users.sql",
+			"public/INDEX/orders_user_id_idx.sql",
+			"public/TRIGGER/users.sql",
+			"public/DEFAULT/orders.sql",
+			"public/FK_CONSTRAINT/orders.sql",
+			"public/CONSTRAINT/users.sql",
+			"public/FUNCTION/audit.sql",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// Verify TABLE/users.sql contains merged content
+	usersData, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/users.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	usersSQL := string(usersData)
+	for _, want := range []string{
+		"CREATE TABLE public.users",
+		"CREATE INDEX users_name_idx",
+		"CREATE TRIGGER users_audit",
+		"CHECK (name <> '')",
+	} {
+		if !strings.Contains(usersSQL, want) {
+			t.Errorf("users.sql should contain %q", want)
+		}
+	}
+
+	// Verify TABLE/orders.sql contains merged content
+	ordersData, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/orders.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordersSQL := string(ordersData)
+	for _, want := range []string{
+		"CREATE TABLE public.orders",
+		"CREATE INDEX orders_user_id_idx",
+		"ALTER COLUMN id SET DEFAULT",
+		"orders_user_fkey FOREIGN KEY",
+	} {
+		if !strings.Contains(ordersSQL, want) {
+			t.Errorf("orders.sql should contain %q", want)
+		}
+	}
+
+	// Verify merged files are removed
+	removed := []string{
+		"public/INDEX/users.sql",
+		"public/INDEX/orders_user_id_idx.sql",
+		"public/TRIGGER/users.sql",
+		"public/DEFAULT/orders.sql",
+		"public/FK_CONSTRAINT/orders.sql",
+		"public/CONSTRAINT/users.sql",
+	}
+	for _, relPath := range removed {
+		if _, err := os.Stat(filepath.Join(destDir, relPath)); !os.IsNotExist(err) {
+			t.Errorf("merged file %s should be removed", relPath)
+		}
+	}
+
+	// Verify FUNCTION file is NOT merged
+	if _, err := os.Stat(filepath.Join(destDir, "public/FUNCTION/audit.sql")); os.IsNotExist(err) {
+		t.Error("FUNCTION/audit.sql should NOT be removed")
+	}
+
+	// Verify index.txt is updated: merged entries removed, TABLE and FUNCTION entries kept
+	indexData, err := os.ReadFile(filepath.Join(destDir, "index.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexContent := string(indexData)
+	for _, want := range []string{
+		"public/TABLE/users.sql",
+		"public/TABLE/orders.sql",
+		"public/FUNCTION/audit.sql",
+	} {
+		if !strings.Contains(indexContent, want) {
+			t.Errorf("index.txt should still contain %q", want)
+		}
+	}
+	for _, notWant := range []string{
+		"public/INDEX/",
+		"public/TRIGGER/",
+		"public/DEFAULT/",
+		"public/FK_CONSTRAINT/",
+		"public/CONSTRAINT/",
+	} {
+		if strings.Contains(indexContent, notWant) {
+			t.Errorf("index.txt should NOT contain %q", notWant)
+		}
+	}
+}
+
+func TestDumpWithMerge(t *testing.T) {
+	tmpDir := t.TempDir()
+	dumpFile := filepath.Join(tmpDir, "dump.sql")
+
+	// Synthetic pg_dump with TABLE + INDEX + TRIGGER
+	dumpContent := strings.Join([]string{
+		"-- Name: users; Type: TABLE; Schema: public; Owner: postgres",
+		"",
+		"CREATE TABLE public.users (",
+		"    id integer NOT NULL,",
+		"    email text",
+		");",
+		"",
+		"-- Name: users_email_idx; Type: INDEX; Schema: public; Owner: postgres",
+		"",
+		"CREATE INDEX users_email_idx ON public.users(email);",
+		"",
+		"-- Name: audit_trigger users; Type: TRIGGER; Schema: public; Owner: postgres",
+		"",
+		"CREATE TRIGGER audit_trigger AFTER UPDATE ON users FOR EACH ROW EXECUTE PROCEDURE audit();",
+		"",
+	}, "\n")
+
+	if err := os.WriteFile(dumpFile, []byte(dumpContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := filepath.Join(tmpDir, "output")
+	if err := Dump(dumpFile, destDir, Options{Merge: true}); err != nil {
+		t.Fatalf("Dump with merge failed: %v", err)
+	}
+
+	// TABLE/users.sql should contain TABLE + INDEX + TRIGGER
+	usersData, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/users.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	usersSQL := string(usersData)
+	if !strings.Contains(usersSQL, "CREATE TABLE public.users") {
+		t.Error("users.sql should contain CREATE TABLE")
+	}
+	if !strings.Contains(usersSQL, "CREATE INDEX users_email_idx") {
+		t.Error("users.sql should contain merged INDEX")
+	}
+	if !strings.Contains(usersSQL, "CREATE TRIGGER audit_trigger") {
+		t.Error("users.sql should contain merged TRIGGER")
+	}
+
+	// Separate INDEX and TRIGGER files should not exist
+	if _, err := os.Stat(filepath.Join(destDir, "public/INDEX/users_email_idx.sql")); !os.IsNotExist(err) {
+		t.Error("INDEX file should be removed after merge")
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "public/TRIGGER/users.sql")); !os.IsNotExist(err) {
+		t.Error("TRIGGER file should be removed after merge")
 	}
 }

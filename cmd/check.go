@@ -65,7 +65,7 @@ func RunCheck(args []string) error {
 
 	// 3. Split the dump
 	schemaSplit := filepath.Join(outputDir, "schemasplit")
-	if err := split.Dump(schemaDump, schemaSplit); err != nil {
+	if err := split.Dump(schemaDump, schemaSplit, split.Options{}); err != nil {
 		return checkererror.Wrap(checkererror.ExitInfra, err, "split schema dump: %s", err)
 	}
 
@@ -77,7 +77,7 @@ func RunCheck(args []string) error {
 
 	// 5. Split the incremental dump
 	incrementalSplit := filepath.Join(outputDir, "incrementalsplit")
-	if err := split.Dump(incrementalDump, incrementalSplit); err != nil {
+	if err := split.Dump(incrementalDump, incrementalSplit, split.Options{}); err != nil {
 		return checkererror.Wrap(checkererror.ExitInfra, err, "split incremental dump: %s", err)
 	}
 
