@@ -73,20 +73,26 @@ func Dump(dumpFile string, destDir string) error {
 func (b *dumpBuffer) processLine(line string) error {
 	switch b.state {
 	case stateEmpty:
-		if err := b.processComment(line); err != nil {
+		consumed, err := b.processComment(line)
+		if err != nil {
 			return err
-		} else if !b.processed && strings.TrimSpace(line) == "" {
-			// skip blank
-		} else if !b.processed {
-			if err := b.flushTo(stateSettings, "SETTINGS.sql", "-- Beginning of dump"); err != nil {
-				return err
-			}
-			b.append(line)
 		}
-	case stateSettings, stateDef, stateInsert:
-		if err := b.processComment(line); err != nil {
+		if consumed {
+			return nil
+		}
+		if strings.TrimSpace(line) == "" {
+			return nil // skip blank
+		}
+		if err := b.flushTo(stateSettings, "SETTINGS.sql", "-- Beginning of dump"); err != nil {
 			return err
-		} else if !b.processed {
+		}
+		b.append(line)
+	case stateSettings, stateDef, stateInsert:
+		consumed, err := b.processComment(line)
+		if err != nil {
+			return err
+		}
+		if !consumed {
 			b.append(line)
 		}
 	case stateData:
@@ -108,18 +114,21 @@ func (b *dumpBuffer) processLine(line string) error {
 			}
 		}
 	case stateSeqSet:
-		if err := b.processComment(line); err != nil {
+		consumed, err := b.processComment(line)
+		if err != nil {
 			return err
-		} else if !b.processed {
-			if strings.HasPrefix(line, "SELECT pg_catalog.setval") {
-				if reSeqSetDefault.MatchString(line) {
-					b.setNewState(stateEmpty, "", "-- avoid creating default seq files")
-				} else {
-					b.append(line)
-				}
+		}
+		if consumed {
+			return nil
+		}
+		if strings.HasPrefix(line, "SELECT pg_catalog.setval") {
+			if reSeqSetDefault.MatchString(line) {
+				b.setNewState(stateEmpty, "", "-- avoid creating default seq files")
 			} else {
 				b.append(line)
 			}
+		} else {
+			b.append(line)
 		}
 	}
 	return nil
@@ -127,12 +136,11 @@ func (b *dumpBuffer) processLine(line string) error {
 
 // dumpBuffer accumulates lines and flushes them to per-object SQL files.
 type dumpBuffer struct {
-	destDir   string
-	lines     []string
-	state     state
-	title     string
-	fname     string
-	processed bool // set by processComment when line was handled as an object comment
+	destDir string
+	lines   []string
+	state   state
+	title   string
+	fname   string
 }
 
 func newDumpBuffer(destDir string) *dumpBuffer {
@@ -159,16 +167,16 @@ func (b *dumpBuffer) numLines() int {
 }
 
 // processComment checks if line is a pg_dump OBJDESC comment and, if so,
-// flushes the current buffer and starts a new file. Sets b.processed to
-// indicate whether the line was consumed.
-func (b *dumpBuffer) processComment(line string) error {
-	b.processed = false
+// flushes the current buffer and starts a new file.
+// Returns (true, nil) if the line was consumed as an object comment,
+// (false, nil) if not a comment, or (false, err) on I/O failure.
+func (b *dumpBuffer) processComment(line string) (bool, error) {
 	if !strings.HasPrefix(line, "--") {
-		return nil
+		return false, nil
 	}
 	match := reObjDesc.FindStringSubmatch(line)
 	if match == nil {
-		return nil
+		return false, nil
 	}
 
 	result := make(map[string]string)
@@ -217,8 +225,7 @@ func (b *dumpBuffer) processComment(line string) error {
 		filename = filename[:251] + ".sql"
 	}
 
-	b.processed = true
-	return b.flushTo(b.state, filename, line)
+	return true, b.flushTo(b.state, filename, line)
 }
 
 // ResolveFilename returns the relative file path for a pg_dump object.
