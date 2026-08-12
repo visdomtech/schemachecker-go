@@ -17,6 +17,8 @@ Where command:
     - orphaned
     - dump
     - dirdiff
+Options:
+    --version, -v    Print version and exit
 `
 
 // PrintUsage writes the usage text to stderr.

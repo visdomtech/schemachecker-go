@@ -10,6 +10,12 @@ Uses [orcacommon/postgres](https://github.com/visdomtech/orcacommon) for Postgre
 go build -o schemachecker .
 ```
 
+To embed a version string at build time:
+
+```sh
+go build -ldflags "-X main.version=$(cat version.txt)" -o schemachecker .
+```
+
 ## Usage
 
 ```
@@ -23,6 +29,8 @@ Where command:
     - orphaned
     - dump
     - dirdiff
+Options:
+    --version, -v    Print version and exit
 ```
 
 ---

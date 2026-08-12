@@ -136,26 +136,26 @@ func (b *dumpBuffer) processLine(line string) error {
 
 // dumpBuffer accumulates lines and flushes them to per-object SQL files.
 type dumpBuffer struct {
-	destDir string
-	lines   []string
-	state   state
-	title   string
-	fname   string
+	destDir       string
+	lines         []string
+	state         state
+	headerComment string
+	filename      string
 }
 
 func newDumpBuffer(destDir string) *dumpBuffer {
 	return &dumpBuffer{
-		destDir: destDir,
-		state:   stateEmpty,
-		title:   "-- Start of split",
+		destDir:       destDir,
+		state:         stateEmpty,
+		headerComment: "-- Start of split",
 	}
 }
 
-func (b *dumpBuffer) setNewState(s state, fname, title string) {
+func (b *dumpBuffer) setNewState(s state, filename, headerComment string) {
 	b.lines = nil
 	b.state = s
-	b.fname = fname
-	b.title = title
+	b.filename = filename
+	b.headerComment = headerComment
 }
 
 func (b *dumpBuffer) append(line string) {
@@ -263,7 +263,7 @@ func ResolveFilename(objType, schema, name, refName string) string {
 	}
 }
 
-func (b *dumpBuffer) flushTo(newState state, newFname, newTitle string) error {
+func (b *dumpBuffer) flushTo(newState state, newFilename, newHeaderComment string) error {
 	// Trim leading comments and blank lines
 	for len(b.lines) > 0 && (strings.TrimSpace(b.lines[0]) == "" || strings.HasPrefix(b.lines[0], "--")) {
 		b.lines = b.lines[1:]
@@ -273,15 +273,15 @@ func (b *dumpBuffer) flushTo(newState state, newFname, newTitle string) error {
 		b.lines = b.lines[:len(b.lines)-1]
 	}
 
-	if len(b.lines) > 0 && b.fname != "" {
-		filePath := filepath.Join(b.destDir, b.fname)
+	if len(b.lines) > 0 && b.filename != "" {
+		filePath := filepath.Join(b.destDir, b.filename)
 
 		// Path containment: ensure resolved path stays within destDir
 		absDest, _ := filepath.Abs(b.destDir)
 		absFile, _ := filepath.Abs(filePath)
 		if !strings.HasPrefix(absFile, absDest+string(os.PathSeparator)) {
-			fmt.Fprintf(os.Stderr, "warning: skipping file %q that escapes output directory\n", b.fname)
-			b.setNewState(newState, newFname, newTitle)
+			fmt.Fprintf(os.Stderr, "warning: skipping file %q that escapes output directory\n", b.filename)
+			b.setNewState(newState, newFilename, newHeaderComment)
 			return nil
 		}
 
@@ -315,7 +315,7 @@ func (b *dumpBuffer) flushTo(newState state, newFname, newTitle string) error {
 			if err != nil {
 				return fmt.Errorf("open index.txt for append: %w", err)
 			}
-			if _, err := fmt.Fprintln(idxFile, b.fname); err != nil {
+			if _, err := fmt.Fprintln(idxFile, b.filename); err != nil {
 				idxFile.Close()
 				return fmt.Errorf("write index.txt: %w", err)
 			}
@@ -344,6 +344,6 @@ func (b *dumpBuffer) flushTo(newState state, newFname, newTitle string) error {
 		}
 	}
 
-	b.setNewState(newState, newFname, newTitle)
+	b.setNewState(newState, newFilename, newHeaderComment)
 	return nil
 }

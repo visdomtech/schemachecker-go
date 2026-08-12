@@ -85,6 +85,9 @@ func DumpFromPool(ctx context.Context, pool *pgxpool.Pool, opts Options) error {
 // ProvisionAndDump creates a testcontainer PostgreSQL, runs migrations from
 // migrationDir, and produces a pg_dump to outputFile.
 func ProvisionAndDump(ctx context.Context, migrationDir, outputFile string, schemaOnly bool) error {
+	if strings.TrimSpace(migrationDir) == "" {
+		return fmt.Errorf("migrationDir must not be empty")
+	}
 	key := fmt.Sprintf("schemachecker-%s", sanitizeKey(migrationDir))
 
 	dbcfg := postgres.DBConfig{}

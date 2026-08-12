@@ -79,6 +79,22 @@ func (d *FileTreeDiffer) Dump() {
 	}
 }
 
+// Summary returns a human-readable count of differences by type.
+func (d *FileTreeDiffer) Summary() string {
+	var added, removed, changed int
+	for _, delta := range d.Deltas {
+		switch delta.Type {
+		case Added:
+			added++
+		case Removed:
+			removed++
+		case Changed:
+			changed++
+		}
+	}
+	return fmt.Sprintf("%d added, %d removed, %d changed", added, removed, changed)
+}
+
 // psqlMetaCommands lists the psql meta commands that should be treated as
 // equivalent when both sides start with the same command.
 var psqlMetaCommands = []string{`\restrict`, `\unrestrict`}

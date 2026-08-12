@@ -9,6 +9,10 @@ import (
 	"github.com/visdomtech/schemachecker-go/internal/checkererror"
 )
 
+// version is set at build time via -ldflags "-X main.version=...".
+// Falls back to "dev" if not set.
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		cmd.PrintUsage()
@@ -16,6 +20,12 @@ func main() {
 	}
 
 	args := os.Args[1:]
+
+	// Handle --version / -v before subcommand dispatch
+	if args[0] == "--version" || args[0] == "-v" {
+		fmt.Println(version)
+		return
+	}
 
 	var err error
 	switch args[0] {

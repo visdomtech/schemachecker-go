@@ -22,5 +22,5 @@ func RunDirDiff(args []string) error {
 		return nil
 	}
 
-	return checkererror.New(checkererror.ExitDiff, "The directories are not the same")
+	return checkererror.New(checkererror.ExitDiff, "The directories are not the same: %s", differ.Summary())
 }
