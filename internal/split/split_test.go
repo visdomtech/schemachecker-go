@@ -19,6 +19,8 @@ func TestResolveFilename(t *testing.T) {
 		{"EXTENSION", "-", "plpgsql", "", "EXTENSION/plpgsql.sql"},
 		{"COMMENT", "-", "ext_comment", "", "EXTENSION/ext_comment.sql"},
 		{"ACL", "-", "public", "", "SCHEMAS/public.sql"},
+		{"SCHEMA", "-", "public", "", "SCHEMAS/public.sql"},
+		{"TYPE", "-", "sometype", "", "SCHEMAS/sometype.sql"},
 
 		// RefName-based types
 		{"CONSTRAINT", "public", "users_pkey", "users", "public/TABLE/users.sql"},
@@ -191,7 +193,7 @@ func TestDumpBasic(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir); err != nil {
+	if err := Dump(dumpFile, destDir, Options{}); err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
 
@@ -264,7 +266,7 @@ func TestDumpCopyData(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir); err != nil {
+	if err := Dump(dumpFile, destDir, Options{}); err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
 
@@ -297,7 +299,7 @@ func TestDumpEmptyCopy(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir); err != nil {
+	if err := Dump(dumpFile, destDir, Options{}); err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
 
@@ -328,7 +330,7 @@ func TestDumpSeqSet(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir); err != nil {
+	if err := Dump(dumpFile, destDir, Options{}); err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
 
@@ -356,7 +358,7 @@ func TestDumpFilenameTruncation(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	err := Dump(dumpFile, destDir)
+	err := Dump(dumpFile, destDir, Options{})
 	if err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
@@ -373,5 +375,693 @@ func TestDumpFilenameTruncation(t *testing.T) {
 		if len(e.Name()) > 255 {
 			t.Errorf("filename %q exceeds 255 chars", e.Name())
 		}
+	}
+}
+
+func TestMergeTableObjects(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	// Create directory structure mimicking a split dump.
+	dirs := []string{
+		"public/TABLE",
+		"public/INDEX",
+		"public/TRIGGER",
+		"public/DEFAULT",
+		"public/FK_CONSTRAINT",
+		"public/CONSTRAINT",
+		"public/FUNCTION",
+	}
+	for _, d := range dirs {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		// TABLE files
+		"public/TABLE/users.sql":  "CREATE TABLE public.users (\n    id integer NOT NULL,\n    name text\n);\n",
+		"public/TABLE/orders.sql": "CREATE TABLE public.orders (\n    id integer NOT NULL,\n    user_id integer\n);\n",
+
+		// INDEX files: one named after table, one named after the index
+		"public/INDEX/users.sql":           "CREATE INDEX users_name_idx ON users(name);\n",
+		"public/INDEX/orders_user_id_idx.sql": "CREATE INDEX orders_user_id_idx ON public.orders(user_id);\n",
+
+		// TRIGGER files
+		"public/TRIGGER/users.sql": "CREATE TRIGGER users_audit AFTER UPDATE ON users FOR EACH ROW EXECUTE PROCEDURE audit();\n",
+
+		// DEFAULT files
+		"public/DEFAULT/orders.sql": "ALTER TABLE public.orders ALTER COLUMN id SET DEFAULT nextval('orders_id_seq');\n",
+
+		// FK_CONSTRAINT files
+		"public/FK_CONSTRAINT/orders.sql": "ALTER TABLE public.orders ADD CONSTRAINT orders_user_fkey FOREIGN KEY (user_id) REFERENCES users(id);\n",
+
+		// CONSTRAINT files
+		"public/CONSTRAINT/users.sql": "ALTER TABLE public.users ADD CONSTRAINT users_name_not_empty CHECK (name <> '');\n",
+
+		// FUNCTION files (should NOT be merged)
+		"public/FUNCTION/audit.sql": "CREATE FUNCTION audit() RETURNS trigger AS $$ BEGIN END $$ LANGUAGE plpgsql;\n",
+
+		// index.txt
+		"index.txt": strings.Join([]string{
+			"public/TABLE/users.sql",
+			"public/TABLE/orders.sql",
+			"public/INDEX/users.sql",
+			"public/INDEX/orders_user_id_idx.sql",
+			"public/TRIGGER/users.sql",
+			"public/DEFAULT/orders.sql",
+			"public/FK_CONSTRAINT/orders.sql",
+			"public/CONSTRAINT/users.sql",
+			"public/FUNCTION/audit.sql",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// Verify TABLE/users.sql contains merged content
+	usersData, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/users.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	usersSQL := string(usersData)
+	for _, want := range []string{
+		"CREATE TABLE public.users",
+		"CREATE INDEX users_name_idx",
+		"CREATE TRIGGER users_audit",
+		"CHECK (name <> '')",
+	} {
+		if !strings.Contains(usersSQL, want) {
+			t.Errorf("users.sql should contain %q", want)
+		}
+	}
+
+	// Verify TABLE/orders.sql contains merged content
+	ordersData, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/orders.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordersSQL := string(ordersData)
+	for _, want := range []string{
+		"CREATE TABLE public.orders",
+		"CREATE INDEX orders_user_id_idx",
+		"ALTER COLUMN id SET DEFAULT",
+		"orders_user_fkey FOREIGN KEY",
+	} {
+		if !strings.Contains(ordersSQL, want) {
+			t.Errorf("orders.sql should contain %q", want)
+		}
+	}
+
+	// Verify merged files are removed
+	removed := []string{
+		"public/INDEX/users.sql",
+		"public/INDEX/orders_user_id_idx.sql",
+		"public/TRIGGER/users.sql",
+		"public/DEFAULT/orders.sql",
+		"public/FK_CONSTRAINT/orders.sql",
+		"public/CONSTRAINT/users.sql",
+	}
+	for _, relPath := range removed {
+		if _, err := os.Stat(filepath.Join(destDir, relPath)); !os.IsNotExist(err) {
+			t.Errorf("merged file %s should be removed", relPath)
+		}
+	}
+
+	// Verify FUNCTION file is NOT merged
+	if _, err := os.Stat(filepath.Join(destDir, "public/FUNCTION/audit.sql")); os.IsNotExist(err) {
+		t.Error("FUNCTION/audit.sql should NOT be removed")
+	}
+
+	// Verify index.txt is updated: merged entries removed, TABLE and FUNCTION entries kept
+	indexData, err := os.ReadFile(filepath.Join(destDir, "index.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexContent := string(indexData)
+	for _, want := range []string{
+		"public/TABLE/users.sql",
+		"public/TABLE/orders.sql",
+		"public/FUNCTION/audit.sql",
+	} {
+		if !strings.Contains(indexContent, want) {
+			t.Errorf("index.txt should still contain %q", want)
+		}
+	}
+	for _, notWant := range []string{
+		"public/INDEX/",
+		"public/TRIGGER/",
+		"public/DEFAULT/",
+		"public/FK_CONSTRAINT/",
+		"public/CONSTRAINT/",
+	} {
+		if strings.Contains(indexContent, notWant) {
+			t.Errorf("index.txt should NOT contain %q", notWant)
+		}
+	}
+}
+
+func TestDumpWithMerge(t *testing.T) {
+	tmpDir := t.TempDir()
+	dumpFile := filepath.Join(tmpDir, "dump.sql")
+
+	// Synthetic pg_dump with TABLE + INDEX + TRIGGER
+	dumpContent := strings.Join([]string{
+		"-- Name: users; Type: TABLE; Schema: public; Owner: postgres",
+		"",
+		"CREATE TABLE public.users (",
+		"    id integer NOT NULL,",
+		"    email text",
+		");",
+		"",
+		"-- Name: users_email_idx; Type: INDEX; Schema: public; Owner: postgres",
+		"",
+		"CREATE INDEX users_email_idx ON public.users(email);",
+		"",
+		"-- Name: audit_trigger users; Type: TRIGGER; Schema: public; Owner: postgres",
+		"",
+		"CREATE TRIGGER audit_trigger AFTER UPDATE ON users FOR EACH ROW EXECUTE PROCEDURE audit();",
+		"",
+	}, "\n")
+
+	if err := os.WriteFile(dumpFile, []byte(dumpContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := filepath.Join(tmpDir, "output")
+	if err := Dump(dumpFile, destDir, Options{Merge: true}); err != nil {
+		t.Fatalf("Dump with merge failed: %v", err)
+	}
+
+	// TABLE/users.sql should contain TABLE + INDEX + TRIGGER
+	usersData, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/users.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	usersSQL := string(usersData)
+	if !strings.Contains(usersSQL, "CREATE TABLE public.users") {
+		t.Error("users.sql should contain CREATE TABLE")
+	}
+	if !strings.Contains(usersSQL, "CREATE INDEX users_email_idx") {
+		t.Error("users.sql should contain merged INDEX")
+	}
+	if !strings.Contains(usersSQL, "CREATE TRIGGER audit_trigger") {
+		t.Error("users.sql should contain merged TRIGGER")
+	}
+
+	// Separate INDEX and TRIGGER files should not exist
+	if _, err := os.Stat(filepath.Join(destDir, "public/INDEX/users_email_idx.sql")); !os.IsNotExist(err) {
+		t.Error("INDEX file should be removed after merge")
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "public/TRIGGER/users.sql")); !os.IsNotExist(err) {
+		t.Error("TRIGGER file should be removed after merge")
+	}
+
+	// Empty directories should be removed after merge
+	for _, dir := range []string{"public/INDEX", "public/TRIGGER", "public/DEFAULT", "public/FK_CONSTRAINT", "public/CONSTRAINT"} {
+		if _, err := os.Stat(filepath.Join(destDir, dir)); !os.IsNotExist(err) {
+			t.Errorf("empty directory %s should be removed after merge", dir)
+		}
+	}
+
+	// Non-empty directories should still exist
+	if _, err := os.Stat(filepath.Join(destDir, "public/TABLE")); os.IsNotExist(err) {
+		t.Error("TABLE directory should still exist")
+	}
+}
+
+func TestMergeInlineSequence(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	// Create directory structure with a table-owned sequence.
+	for _, d := range []string{"public/TABLE", "public/SEQUENCE", "public/DEFAULT"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"public/TABLE/users.sql": "CREATE TABLE public.users (\n    id integer NOT NULL,\n    name text\n);\n",
+		"public/SEQUENCE/users_id_seq.sql": strings.Join([]string{
+			"ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;",
+			"",
+			"CREATE SEQUENCE public.users_id_seq",
+			"    START WITH 1",
+			"    INCREMENT BY 1",
+			"    NO MINVALUE",
+			"    NO MAXVALUE",
+			"    CACHE 1;",
+		}, "\n") + "\n",
+		"public/DEFAULT/users.sql": "ALTER TABLE public.users ALTER COLUMN id SET DEFAULT nextval('users_id_seq'::regclass);\n",
+		"index.txt": strings.Join([]string{
+			"public/TABLE/users.sql",
+			"public/SEQUENCE/users_id_seq.sql",
+			"public/DEFAULT/users.sql",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE/users.sql should have id as bigserial instead of integer
+	usersData, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/users.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	usersSQL := string(usersData)
+	if !strings.Contains(usersSQL, "bigserial") {
+		t.Errorf("users.sql should contain 'bigserial', got:\n%s", usersSQL)
+	}
+	if strings.Contains(usersSQL, "integer NOT NULL") {
+		t.Error("users.sql should NOT contain 'integer NOT NULL' after inlining")
+	}
+	if strings.Contains(usersSQL, "nextval") {
+		t.Error("users.sql should NOT contain 'nextval' default after inlining")
+	}
+
+	// SEQUENCE file should be removed (standard sequence inlined)
+	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/users_id_seq.sql")); !os.IsNotExist(err) {
+		t.Error("SEQUENCE file should be removed after inlining")
+	}
+
+	// DEFAULT file should be removed (nextval line removed)
+	if _, err := os.Stat(filepath.Join(destDir, "public/DEFAULT/users.sql")); !os.IsNotExist(err) {
+		t.Error("DEFAULT file should be removed after inlining nextval")
+	}
+}
+
+func TestMergeInlineSequenceNonStandard(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	// Non-standard sequence (with CYCLE) should NOT be inlined.
+	for _, d := range []string{"public/TABLE", "public/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"public/TABLE/items.sql": "CREATE TABLE public.items (\n    id integer NOT NULL\n);\n",
+		"public/SEQUENCE/items_id_seq.sql": strings.Join([]string{
+			"ALTER SEQUENCE public.items_id_seq OWNED BY public.items.id;",
+			"",
+			"CREATE SEQUENCE public.items_id_seq",
+			"    START WITH 0",
+			"    INCREMENT BY 1",
+			"    MINVALUE 0",
+			"    MAXVALUE 999999",
+			"    CACHE 1",
+			"    CYCLE;",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE should be unchanged (non-standard sequence)
+	itemsData, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/items.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(itemsData), "bigserial") {
+		t.Error("non-standard sequence should NOT be inlined")
+	}
+
+	// SEQUENCE file should still exist
+	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/items_id_seq.sql")); os.IsNotExist(err) {
+		t.Error("non-standard SEQUENCE file should be preserved")
+	}
+}
+
+func TestMergeInlineSequenceBigint(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"public/TABLE", "public/SEQUENCE", "public/DEFAULT"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"public/TABLE/orders.sql": "CREATE TABLE public.orders (\n    id bigint NOT NULL,\n    total numeric\n);\n",
+		"public/SEQUENCE/orders_id_seq.sql": strings.Join([]string{
+			"ALTER SEQUENCE public.orders_id_seq OWNED BY public.orders.id;",
+			"",
+			"CREATE SEQUENCE public.orders_id_seq",
+			"    START WITH 1",
+			"    INCREMENT BY 1",
+			"    NO MINVALUE",
+			"    NO MAXVALUE",
+			"    CACHE 1;",
+		}, "\n") + "\n",
+		"public/DEFAULT/orders.sql": "ALTER TABLE ONLY public.orders ALTER COLUMN id SET DEFAULT nextval('orders_id_seq'::regclass);\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// bigint should also be converted to bigserial
+	ordersData, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/orders.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ordersData), "bigserial") {
+		t.Errorf("bigint column should be converted to bigserial, got:\n%s", string(ordersData))
+	}
+}
+
+func TestMergeInlineSequenceDefaultInTableFile(t *testing.T) {
+	// Reproduces the real pg_dump case where the nextval DEFAULT and
+	// constraints are already inside the TABLE file (not a separate DEFAULT/ file).
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"approval/TABLE", "approval/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"approval/TABLE/instances.sql": strings.Join([]string{
+			"CREATE TABLE approval.instances (",
+			"    instance_id bigint NOT NULL,",
+			"    workspace_id text NOT NULL",
+			");",
+			"",
+			"ALTER TABLE ONLY approval.instances ALTER COLUMN instance_id SET DEFAULT nextval('approval.instances_instance_id_seq'::regclass);",
+		}, "\n") + "\n",
+		"approval/SEQUENCE/instances_instance_id_seq.sql": strings.Join([]string{
+			"CREATE SEQUENCE approval.instances_instance_id_seq",
+			"    START WITH 1",
+			"    INCREMENT BY 1",
+			"    NO MINVALUE",
+			"    NO MAXVALUE",
+			"    CACHE 1;",
+			"",
+			"ALTER SEQUENCE approval.instances_instance_id_seq OWNED BY approval.instances.instance_id;",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE file should have bigserial and no nextval
+	data, err := os.ReadFile(filepath.Join(destDir, "approval/TABLE/instances.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(data)
+	if !strings.Contains(sql, "bigserial") {
+		t.Errorf("instance_id should be bigserial, got:\n%s", sql)
+	}
+	if strings.Contains(sql, "nextval") {
+		t.Errorf("nextval DEFAULT should be removed from TABLE file, got:\n%s", sql)
+	}
+
+	// SEQUENCE file should be removed
+	if _, err := os.Stat(filepath.Join(destDir, "approval/SEQUENCE/instances_instance_id_seq.sql")); !os.IsNotExist(err) {
+		t.Error("SEQUENCE file should be removed after inlining")
+	}
+}
+
+func TestMergeInlineIdentitySequence(t *testing.T) {
+	// PostgreSQL IDENTITY columns (GENERATED ALWAYS AS IDENTITY) are emitted
+	// by pg_dump as separate SEQUENCE objects. The merge should convert them
+	// to bigserial and remove the SEQUENCE file.
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"orca/TABLE", "orca/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"orca/TABLE/policy_drafts.sql": strings.Join([]string{
+			"CREATE TABLE orca.policy_drafts (",
+			"    draft_id bigint NOT NULL,",
+			"    workspace_id text NOT NULL,",
+			"    title text DEFAULT ''::text NOT NULL",
+			");",
+			"",
+			"ALTER TABLE orca.policy_drafts OWNER TO test;",
+			"ALTER TABLE ONLY orca.policy_drafts",
+			"    ADD CONSTRAINT policy_drafts_pkey PRIMARY KEY (draft_id);",
+		}, "\n") + "\n",
+		"orca/SEQUENCE/policy_drafts_draft_id_seq.sql": strings.Join([]string{
+			"ALTER TABLE orca.policy_drafts ALTER COLUMN draft_id ADD GENERATED ALWAYS AS IDENTITY (",
+			"SEQUENCE NAME orca.policy_drafts_draft_id_seq",
+			"    START WITH 1",
+			"    INCREMENT BY 1",
+			"    NO MINVALUE",
+			"    NO MAXVALUE",
+			"    CACHE 1",
+			");",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE file should have bigserial
+	data, err := os.ReadFile(filepath.Join(destDir, "orca/TABLE/policy_drafts.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(data)
+	if !strings.Contains(sql, "bigserial") {
+		t.Errorf("draft_id should be bigserial, got:\n%s", sql)
+	}
+
+	// SEQUENCE file should be removed
+	if _, err := os.Stat(filepath.Join(destDir, "orca/SEQUENCE/policy_drafts_draft_id_seq.sql")); !os.IsNotExist(err) {
+		t.Error("IDENTITY SEQUENCE file should be removed after inlining")
+	}
+}
+
+func TestMergeInlineSequenceTableMissing(t *testing.T) {
+	// When the TABLE file doesn't exist, the SEQUENCE file should be preserved
+	// (not silently deleted).
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	if err := os.MkdirAll(filepath.Join(destDir, "public/SEQUENCE"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Note: no TABLE directory, so no table file exists.
+
+	seqContent := strings.Join([]string{
+		"CREATE SEQUENCE public.orphan_seq",
+		"    START WITH 1",
+		"    INCREMENT BY 1",
+		"    NO MINVALUE",
+		"    NO MAXVALUE",
+		"    CACHE 1;",
+		"",
+		"ALTER SEQUENCE public.orphan_seq OWNED BY public.missing_table.id;",
+	}, "\n") + "\n"
+
+	if err := os.WriteFile(filepath.Join(destDir, "public/SEQUENCE/orphan_seq.sql"), []byte(seqContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// SEQUENCE file should be preserved when TABLE is missing.
+	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/orphan_seq.sql")); os.IsNotExist(err) {
+		t.Error("SEQUENCE file should be preserved when TABLE file is missing")
+	}
+}
+
+func TestMergeInlineSequenceQuotedIdentifiers(t *testing.T) {
+	// pg_dump may emit quoted identifiers in OWNED BY.
+	// The inliner should strip quotes and still match files.
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"public/TABLE", "public/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"public/TABLE/users.sql": "CREATE TABLE public.users (\n    id integer NOT NULL\n);\n",
+		"public/SEQUENCE/users_id_seq.sql": strings.Join([]string{
+			"ALTER SEQUENCE public.users_id_seq OWNED BY \"public\".\"users\".\"id\";",
+			"",
+			"CREATE SEQUENCE public.users_id_seq",
+			"    START WITH 1",
+			"    INCREMENT BY 1",
+			"    NO MINVALUE",
+			"    NO MAXVALUE",
+			"    CACHE 1;",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE file should have bigserial.
+	data, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/users.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "bigserial") {
+		t.Errorf("id should be bigserial with quoted identifiers, got:\n%s", string(data))
+	}
+
+	// SEQUENCE file should be removed.
+	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/users_id_seq.sql")); !os.IsNotExist(err) {
+		t.Error("SEQUENCE file should be removed even with quoted identifiers")
+	}
+}
+
+func TestMergeInlineSequenceNoCycleIsStandard(t *testing.T) {
+	// pg_dump emits "NO CYCLE" for standard sequences.
+	// The inliner should treat these as standard (inlineable).
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"public/TABLE", "public/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"public/TABLE/events.sql": "CREATE TABLE public.events (\n    id bigint NOT NULL\n);\n",
+		"public/SEQUENCE/events_id_seq.sql": strings.Join([]string{
+			"CREATE SEQUENCE public.events_id_seq",
+			"    START WITH 1",
+			"    INCREMENT BY 1",
+			"    NO MINVALUE",
+			"    NO MAXVALUE",
+			"    NO CYCLE",
+			"    CACHE 1;",
+			"",
+			"ALTER SEQUENCE public.events_id_seq OWNED BY public.events.id;",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE file should have bigserial (NO CYCLE is standard).
+	data, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/events.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "bigserial") {
+		t.Errorf("id should be bigserial when sequence has NO CYCLE, got:\n%s", string(data))
+	}
+
+	// SEQUENCE file should be removed.
+	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/events_id_seq.sql")); !os.IsNotExist(err) {
+		t.Error("SEQUENCE with NO CYCLE should be inlined and removed")
+	}
+}
+
+func TestMergeInlineSequenceNegativeMinvalue(t *testing.T) {
+	// A sequence with MINVALUE -1 is non-standard and should NOT be inlined.
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"public/TABLE", "public/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"public/TABLE/temps.sql": "CREATE TABLE public.temps (\n    id integer NOT NULL\n);\n",
+		"public/SEQUENCE/temps_id_seq.sql": strings.Join([]string{
+			"CREATE SEQUENCE public.temps_id_seq",
+			"    START WITH -10",
+			"    INCREMENT BY 1",
+			"    MINVALUE -10",
+			"    NO MAXVALUE",
+			"    CACHE 1;",
+			"",
+			"ALTER SEQUENCE public.temps_id_seq OWNED BY public.temps.id;",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE file should NOT have bigserial (non-standard MINVALUE -10).
+	data, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/temps.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "bigserial") {
+		t.Errorf("id should NOT be bigserial with negative MINVALUE, got:\n%s", string(data))
+	}
+
+	// SEQUENCE file should be preserved.
+	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/temps_id_seq.sql")); os.IsNotExist(err) {
+		t.Error("SEQUENCE with negative MINVALUE should be preserved")
 	}
 }

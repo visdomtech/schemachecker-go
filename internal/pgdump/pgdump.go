@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/caarlos0/env/v11"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/visdomtech/orcacommon/postgres"
 )
@@ -60,7 +61,17 @@ func DumpFromPool(ctx context.Context, pool *pgxpool.Pool, opts Options) error {
 	}
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", password))
+	// Use minimal environment to avoid leaking parent secrets to child process.
+	cmd.Env = []string{
+		fmt.Sprintf("PGPASSWORD=%s", password),
+		"PATH=" + os.Getenv("PATH"),
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		cmd.Env = append(cmd.Env, "HOME="+home)
+	}
+	if tz := os.Getenv("TZ"); tz != "" {
+		cmd.Env = append(cmd.Env, "TZ="+tz)
+	}
 	cmd.Stdout = outFile
 
 	var stderr bytes.Buffer
@@ -90,7 +101,10 @@ func ProvisionAndDump(ctx context.Context, migrationDir, outputFile string, sche
 	}
 	key := fmt.Sprintf("schemachecker-%s", sanitizeKey(migrationDir))
 
-	dbcfg := postgres.DBConfig{}
+	var dbcfg postgres.DBConfig
+	if err := env.ParseWithOptions(&dbcfg, env.Options{Prefix: "DB_"}); err != nil {
+		return fmt.Errorf("parse database config from environment: %w", err)
+	}
 	migrator := postgres.NewMigrator(os.DirFS(migrationDir), nil)
 
 	pool, err := postgres.OpenPoolWithKey(ctx, dbcfg, migrator, key)

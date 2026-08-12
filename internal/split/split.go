@@ -35,8 +35,15 @@ const (
 	stateSeqSet
 )
 
+// Options configures the split behavior.
+type Options struct {
+	// Merge inlines INDEX, TRIGGER, DEFAULT, CONSTRAINT, and FK_CONSTRAINT
+	// SQL into the corresponding TABLE file instead of creating separate files.
+	Merge bool
+}
+
 // Dump splits the pg_dump file at dumpFile into per-object SQL files under destDir.
-func Dump(dumpFile string, destDir string) error {
+func Dump(dumpFile string, destDir string, opts Options) error {
 	f, err := os.Open(dumpFile)
 	if err != nil {
 		return fmt.Errorf("open dump file: %w", err)
@@ -65,6 +72,12 @@ func Dump(dumpFile string, destDir string) error {
 	// flush final buffer
 	if err := buf.flushTo(stateEmpty, "", "-- flushing last buff at end of file"); err != nil {
 		return fmt.Errorf("final flush: %w", err)
+	}
+
+	if opts.Merge {
+		if err := MergeTableObjects(destDir); err != nil {
+			return fmt.Errorf("merge post-processing failed (unmerged split still available at %s): %w", destDir, err)
+		}
 	}
 	return nil
 }
@@ -236,7 +249,8 @@ func ResolveFilename(objType, schema, name, refName string) string {
 	if schema == "-" && objType == "COMMENT" {
 		return fmt.Sprintf("EXTENSION/%s.sql", name)
 	}
-	if schema == "-" && objType == "ACL" {
+	// Any remaining schema-less objects (SCHEMA, ACL, etc.) go to SCHEMAS/.
+	if schema == "-" {
 		return fmt.Sprintf("SCHEMAS/%s.sql", name)
 	}
 	switch objType {
@@ -277,8 +291,14 @@ func (b *dumpBuffer) flushTo(newState state, newFilename, newHeaderComment strin
 		filePath := filepath.Join(b.destDir, b.filename)
 
 		// Path containment: ensure resolved path stays within destDir
-		absDest, _ := filepath.Abs(b.destDir)
-		absFile, _ := filepath.Abs(filePath)
+		absDest, err := filepath.Abs(b.destDir)
+		if err != nil {
+			return fmt.Errorf("resolve destDir abs path: %w", err)
+		}
+		absFile, err := filepath.Abs(filePath)
+		if err != nil {
+			return fmt.Errorf("resolve file abs path: %w", err)
+		}
 		if !strings.HasPrefix(absFile, absDest+string(os.PathSeparator)) {
 			fmt.Fprintf(os.Stderr, "warning: skipping file %q that escapes output directory\n", b.filename)
 			b.setNewState(newState, newFilename, newHeaderComment)
