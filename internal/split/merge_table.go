@@ -39,6 +39,11 @@ func MergeTableObjects(destDir string) error {
 			continue
 		}
 
+		// Inline standard table-owned sequences as BIGSERIAL before other merges.
+		if err := inlineSequences(destDir, schemaName); err != nil {
+			return err
+		}
+
 		if err := mergeSchemaTables(destDir, schemaName, tableDir); err != nil {
 			return err
 		}
@@ -161,6 +166,134 @@ func appendContent(dstPath string, content []byte) error {
 	}
 	_, err = f.Write(content)
 	return err
+}
+
+// reOwnedBy matches ALTER SEQUENCE ... OWNED BY [schema.]table.column;
+var reOwnedBy = regexp.MustCompile(`(?i)OWNED\s+BY\s+([\w."]+)`)
+
+// reSeqNonStandard matches lines inside a CREATE SEQUENCE definition.
+var reSeqNonStandard = regexp.MustCompile(`(?i)(CYCLE|MINVALUE\s+\d|MAXVALUE\s+\d)`)
+
+// inlineSequences scans SEQUENCE/ for table-owned standard sequences, converts
+// the owning table's column to BIGSERIAL, removes the nextval DEFAULT, and
+// removes the SEQUENCE file.
+func inlineSequences(destDir, schemaName string) error {
+	seqDir := filepath.Join(destDir, schemaName, "SEQUENCE")
+	entries, err := os.ReadDir(seqDir)
+	if err != nil {
+		return nil // no SEQUENCE dir
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		seqPath := filepath.Join(seqDir, entry.Name())
+		data, err := os.ReadFile(seqPath)
+		if err != nil {
+			return err
+		}
+		content := string(data)
+
+		// Parse OWNED BY to find the table and column.
+		tableName, columnName := parseSequenceOwnedBy(content)
+		if tableName == "" {
+			continue // standalone sequence
+		}
+
+		// Only inline standard sequences (no CYCLE, no explicit MIN/MAX).
+		if !isStandardSequence(content) {
+			continue
+		}
+
+		// Modify the TABLE file: replace column type with bigserial.
+		tablePath := filepath.Join(destDir, schemaName, "TABLE", tableName+".sql")
+		if err := inlineBigserial(tablePath, columnName); err != nil {
+			return err
+		}
+
+		// Remove the nextval default from the DEFAULT file.
+		defaultPath := filepath.Join(destDir, schemaName, "DEFAULT", tableName+".sql")
+		if err := removeDefaultNextval(defaultPath, columnName); err != nil {
+			return err
+		}
+
+		// Remove the SEQUENCE file.
+		if err := os.Remove(seqPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// parseSequenceOwnedBy extracts table and column names from an
+// ALTER SEQUENCE ... OWNED BY [schema.]table.column statement.
+func parseSequenceOwnedBy(content string) (table, column string) {
+	match := reOwnedBy.FindStringSubmatch(content)
+	if match == nil {
+		return "", ""
+	}
+	ref := match[1]
+	parts := strings.Split(ref, ".")
+	switch len(parts) {
+	case 3: // schema.table.column
+		return parts[1], parts[2]
+	case 2: // table.column
+		return parts[0], parts[1]
+	default:
+		return "", ""
+	}
+}
+
+// isStandardSequence returns true if the CREATE SEQUENCE can be expressed
+// as BIGSERIAL (no CYCLE, no explicit MINVALUE/MAXVALUE).
+func isStandardSequence(content string) bool {
+	return !reSeqNonStandard.MatchString(content)
+}
+
+// inlineBigserial replaces the column's integer/bigint type with bigserial
+// in the TABLE file.
+func inlineBigserial(tablePath, columnName string) error {
+	data, err := os.ReadFile(tablePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	content := string(data)
+
+	// Match the column definition line containing the column name.
+	reCol := regexp.MustCompile(
+		`(?i)(` + regexp.QuoteMeta(columnName) + `\s+)(integer|bigint|int4|int8)(\s+NOT\s+NULL)`)
+	if !reCol.MatchString(content) {
+		return nil // column not found or already serial
+	}
+	newContent := reCol.ReplaceAllString(content, "${1}bigserial${3}")
+	return os.WriteFile(tablePath, []byte(newContent), 0o644)
+}
+
+// removeDefaultNextval removes the ALTER COLUMN ... SET DEFAULT nextval(...) line
+// for the given column from the DEFAULT file. If the file becomes empty, removes it.
+func removeDefaultNextval(defaultPath, columnName string) error {
+	data, err := os.ReadFile(defaultPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	// Remove lines matching the nextval default for this column.
+	reCol := regexp.MustCompile(
+		`(?i)ALTER\s+TABLE\s+(?:ONLY\s+)?[\w."]+\s+ALTER\s+COLUMN\s+` +
+			regexp.QuoteMeta(columnName) + `\s+SET\s+DEFAULT\s+nextval\([^)]*\)[^;]*;[ \t]*\n?`)
+	newContent := reCol.ReplaceAllLiteralString(string(data), "")
+
+	if len(strings.TrimSpace(newContent)) == 0 {
+		return os.Remove(defaultPath)
+	}
+	return os.WriteFile(defaultPath, []byte(newContent), 0o644)
 }
 
 // removeEmptyDirs walks destDir bottom-up and removes any empty directories.

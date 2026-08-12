@@ -595,3 +595,164 @@ func TestDumpWithMerge(t *testing.T) {
 		t.Error("TABLE directory should still exist")
 	}
 }
+
+func TestMergeInlineSequence(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	// Create directory structure with a table-owned sequence.
+	for _, d := range []string{"public/TABLE", "public/SEQUENCE", "public/DEFAULT"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"public/TABLE/users.sql": "CREATE TABLE public.users (\n    id integer NOT NULL,\n    name text\n);\n",
+		"public/SEQUENCE/users_id_seq.sql": strings.Join([]string{
+			"ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;",
+			"",
+			"CREATE SEQUENCE public.users_id_seq",
+			"    START WITH 1",
+			"    INCREMENT BY 1",
+			"    NO MINVALUE",
+			"    NO MAXVALUE",
+			"    CACHE 1;",
+		}, "\n") + "\n",
+		"public/DEFAULT/users.sql": "ALTER TABLE public.users ALTER COLUMN id SET DEFAULT nextval('users_id_seq'::regclass);\n",
+		"index.txt": strings.Join([]string{
+			"public/TABLE/users.sql",
+			"public/SEQUENCE/users_id_seq.sql",
+			"public/DEFAULT/users.sql",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE/users.sql should have id as bigserial instead of integer
+	usersData, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/users.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	usersSQL := string(usersData)
+	if !strings.Contains(usersSQL, "bigserial") {
+		t.Errorf("users.sql should contain 'bigserial', got:\n%s", usersSQL)
+	}
+	if strings.Contains(usersSQL, "integer NOT NULL") {
+		t.Error("users.sql should NOT contain 'integer NOT NULL' after inlining")
+	}
+	if strings.Contains(usersSQL, "nextval") {
+		t.Error("users.sql should NOT contain 'nextval' default after inlining")
+	}
+
+	// SEQUENCE file should be removed (standard sequence inlined)
+	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/users_id_seq.sql")); !os.IsNotExist(err) {
+		t.Error("SEQUENCE file should be removed after inlining")
+	}
+
+	// DEFAULT file should be removed (nextval line removed)
+	if _, err := os.Stat(filepath.Join(destDir, "public/DEFAULT/users.sql")); !os.IsNotExist(err) {
+		t.Error("DEFAULT file should be removed after inlining nextval")
+	}
+}
+
+func TestMergeInlineSequenceNonStandard(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	// Non-standard sequence (with CYCLE) should NOT be inlined.
+	for _, d := range []string{"public/TABLE", "public/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"public/TABLE/items.sql": "CREATE TABLE public.items (\n    id integer NOT NULL\n);\n",
+		"public/SEQUENCE/items_id_seq.sql": strings.Join([]string{
+			"ALTER SEQUENCE public.items_id_seq OWNED BY public.items.id;",
+			"",
+			"CREATE SEQUENCE public.items_id_seq",
+			"    START WITH 0",
+			"    INCREMENT BY 1",
+			"    MINVALUE 0",
+			"    MAXVALUE 999999",
+			"    CACHE 1",
+			"    CYCLE;",
+		}, "\n") + "\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE should be unchanged (non-standard sequence)
+	itemsData, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/items.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(itemsData), "bigserial") {
+		t.Error("non-standard sequence should NOT be inlined")
+	}
+
+	// SEQUENCE file should still exist
+	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/items_id_seq.sql")); os.IsNotExist(err) {
+		t.Error("non-standard SEQUENCE file should be preserved")
+	}
+}
+
+func TestMergeInlineSequenceBigint(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"public/TABLE", "public/SEQUENCE", "public/DEFAULT"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		"public/TABLE/orders.sql": "CREATE TABLE public.orders (\n    id bigint NOT NULL,\n    total numeric\n);\n",
+		"public/SEQUENCE/orders_id_seq.sql": strings.Join([]string{
+			"ALTER SEQUENCE public.orders_id_seq OWNED BY public.orders.id;",
+			"",
+			"CREATE SEQUENCE public.orders_id_seq",
+			"    START WITH 1",
+			"    INCREMENT BY 1",
+			"    NO MINVALUE",
+			"    NO MAXVALUE",
+			"    CACHE 1;",
+		}, "\n") + "\n",
+		"public/DEFAULT/orders.sql": "ALTER TABLE ONLY public.orders ALTER COLUMN id SET DEFAULT nextval('orders_id_seq'::regclass);\n",
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// bigint should also be converted to bigserial
+	ordersData, err := os.ReadFile(filepath.Join(destDir, "public/TABLE/orders.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ordersData), "bigserial") {
+		t.Errorf("bigint column should be converted to bigserial, got:\n%s", string(ordersData))
+	}
+}
