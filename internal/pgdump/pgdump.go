@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/caarlos0/env/v11"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/visdomtech/orcacommon/postgres"
 )
@@ -90,7 +91,10 @@ func ProvisionAndDump(ctx context.Context, migrationDir, outputFile string, sche
 	}
 	key := fmt.Sprintf("schemachecker-%s", sanitizeKey(migrationDir))
 
-	dbcfg := postgres.DBConfig{}
+	var dbcfg postgres.DBConfig
+	if err := env.ParseWithOptions(&dbcfg, env.Options{Prefix: "DB_"}); err != nil {
+		return fmt.Errorf("parse database config from environment: %w", err)
+	}
 	migrator := postgres.NewMigrator(os.DirFS(migrationDir), nil)
 
 	pool, err := postgres.OpenPoolWithKey(ctx, dbcfg, migrator, key)
