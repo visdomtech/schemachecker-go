@@ -286,6 +286,16 @@ func stripQuotes(s string) string {
 	return s
 }
 
+// splitDotRef splits a dot-separated PostgreSQL reference and strips quotes
+// from each part (e.g. `"public"."users"."id"` → ["public", "users", "id"]).
+func splitDotRef(ref string) []string {
+	parts := strings.Split(ref, ".")
+	for i := range parts {
+		parts[i] = stripQuotes(parts[i])
+	}
+	return parts
+}
+
 // parseSequenceOwnedBy extracts table and column names from an
 // ALTER SEQUENCE ... OWNED BY [schema.]table.column statement.
 func parseSequenceOwnedBy(content string) (table, column string) {
@@ -293,11 +303,7 @@ func parseSequenceOwnedBy(content string) (table, column string) {
 	if match == nil {
 		return "", ""
 	}
-	ref := match[1]
-	parts := strings.Split(ref, ".")
-	for i := range parts {
-		parts[i] = stripQuotes(parts[i])
-	}
+	parts := splitDotRef(match[1])
 	switch len(parts) {
 	case 3: // schema.table.column
 		return parts[1], parts[2]
@@ -315,16 +321,13 @@ func parseIdentitySequence(content string) (table, column string) {
 	if match == nil {
 		return "", ""
 	}
-	ref := match[1]
-	parts := strings.Split(ref, ".")
-	for i := range parts {
-		parts[i] = stripQuotes(parts[i])
-	}
+	parts := splitDotRef(match[1])
+	col := stripQuotes(match[2])
 	switch len(parts) {
 	case 2: // schema.table
-		return parts[1], stripQuotes(match[2])
+		return parts[1], col
 	case 1: // table
-		return parts[0], stripQuotes(match[2])
+		return parts[0], col
 	default:
 		return "", ""
 	}
@@ -417,34 +420,44 @@ func removeEmptyDirs(destDir string) {
 	}
 }
 
-// updateIndexAfterMerge rewrites index.txt to remove entries that no longer
-// exist on disk (merged files) and keeps the rest in their original order.
-func updateIndexAfterMerge(destDir string) error {
-	indexPath := filepath.Join(destDir, "index.txt")
-	f, err := os.Open(indexPath)
+// readLines reads a file and returns its non-empty trimmed lines.
+func readLines(path string) ([]string, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
+		return nil, err
 	}
-
-	var kept []string
+	var lines []string
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := scanner.Text()
-		entry := strings.TrimSpace(line)
-		if entry == "" {
-			continue
-		}
-		fullPath := filepath.Join(destDir, entry)
-		if _, err := os.Stat(fullPath); err == nil {
-			kept = append(kept, entry)
+		if line := strings.TrimSpace(scanner.Text()); line != "" {
+			lines = append(lines, line)
 		}
 	}
 	f.Close()
 	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return lines, nil
+}
+
+// updateIndexAfterMerge rewrites index.txt to remove entries that no longer
+// exist on disk (merged files) and keeps the rest in their original order.
+func updateIndexAfterMerge(destDir string) error {
+	indexPath := filepath.Join(destDir, "index.txt")
+	lines, err := readLines(indexPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return fmt.Errorf("read index.txt: %w", err)
+	}
+
+	// Keep only entries whose files still exist.
+	var kept []string
+	for _, entry := range lines {
+		if _, err := os.Stat(filepath.Join(destDir, entry)); err == nil {
+			kept = append(kept, entry)
+		}
 	}
 
 	// Rewrite index.txt with surviving entries.
