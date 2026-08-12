@@ -42,11 +42,13 @@ func FromIndex(indexFile, migrationFile string) error {
 			}
 		} else {
 			trimmed := strings.TrimSpace(line)
+			// Clean the entry to normalize . and .. before joining
+			trimmed = filepath.Clean(trimmed)
 			filePath := filepath.Join(root, trimmed)
 
 			// Path containment: ensure resolved path stays within root
 			absPath, _ := filepath.Abs(filePath)
-			if !strings.HasPrefix(absPath, absRoot+string(os.PathSeparator)) && absPath != absRoot {
+			if !strings.HasPrefix(absPath, absRoot+string(os.PathSeparator)) {
 				out.Close()
 				return fmt.Errorf("index entry %q escapes base directory %s", trimmed, root)
 			}

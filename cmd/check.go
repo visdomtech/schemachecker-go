@@ -24,6 +24,17 @@ func RunCheck(args []string) error {
 	incrementalMigrations := args[2]
 	outputDir := args[3]
 
+	// Safety check: refuse to remove dangerous directories
+	absOut, err := filepath.Abs(outputDir)
+	if err != nil {
+		return checkererror.Wrap(checkererror.ExitUsage, err, "resolve output directory: %s", err)
+	}
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+	if absOut == "/" || absOut == cwd || absOut == home {
+		return checkererror.New(checkererror.ExitUsage, "refusing to remove dangerous output directory: %s", outputDir)
+	}
+
 	// Clean output directory to prevent corruption from partial retries
 	if err := os.RemoveAll(outputDir); err != nil {
 		return checkererror.Wrap(checkererror.ExitInfra, err, "clean output directory: %s", err)
