@@ -12,7 +12,7 @@ func RunOrphaned(args []string) error {
 		return UsageError("Invalid command line arguments.\nUsage orphaned [indexfile]")
 	}
 	if err := orphaned.FromIndex(args[1]); err != nil {
-		return checkererror.New(1, "%s", err)
+		return checkererror.Wrap(checkererror.ExitDiff, err, "orphaned files detected: %s", err)
 	}
 	return nil
 }

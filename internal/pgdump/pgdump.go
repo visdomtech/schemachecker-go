@@ -2,7 +2,9 @@
 package pgdump
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -22,6 +24,7 @@ type Options struct {
 }
 
 // DumpFromPool runs pg_dump against the database connected via the given pool.
+// pg_dump output is streamed directly to the output file to minimize peak memory.
 func DumpFromPool(ctx context.Context, pool *pgxpool.Pool, opts Options) error {
 	cfg := pool.Config().ConnConfig
 	host := cfg.Host
@@ -49,21 +52,31 @@ func DumpFromPool(ctx context.Context, pool *pgxpool.Pool, opts Options) error {
 	args = append(args, fmt.Sprintf("--port=%s", port))
 	args = append(args, dbname)
 
-	slog.Info("running pg_dump", "host", host, "port", port, "db", dbname, "args", args)
+	slog.Debug("running pg_dump", "host", host, "port", port, "db", dbname)
+
+	outFile, err := os.Create(opts.OutputFile)
+	if err != nil {
+		return fmt.Errorf("create dump output file: %w", err)
+	}
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", password))
+	cmd.Stdout = outFile
 
-	output, err := cmd.Output()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return fmt.Errorf("pg_dump failed: %s\n%s", err, string(exitErr.Stderr))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		outFile.Close()
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return fmt.Errorf("pg_dump failed: %s\n%s", err, stderr.String())
 		}
 		return fmt.Errorf("pg_dump failed: %w", err)
 	}
 
-	if err := os.WriteFile(opts.OutputFile, output, 0o644); err != nil {
-		return fmt.Errorf("write dump output: %w", err)
+	if err := outFile.Close(); err != nil {
+		return fmt.Errorf("close dump output file: %w", err)
 	}
 
 	return nil
@@ -71,16 +84,10 @@ func DumpFromPool(ctx context.Context, pool *pgxpool.Pool, opts Options) error {
 
 // ProvisionAndDump creates a testcontainer PostgreSQL, runs migrations from
 // migrationDir, and produces a pg_dump to outputFile.
-func ProvisionAndDump(ctx context.Context, migrationDir, outputFile, initScript string, schemaOnly bool) error {
+func ProvisionAndDump(ctx context.Context, migrationDir, outputFile string, schemaOnly bool) error {
 	key := fmt.Sprintf("schemachecker-%s", sanitizeKey(migrationDir))
 
 	dbcfg := postgres.DBConfig{}
-	if initScript != "" {
-		// orcacommon's testcontainer doesn't natively support init scripts via DBConfig,
-		// but the migration dir should handle initialization.
-		slog.Warn("initScript specified but orcacommon testcontainer uses Atlas migrations; initScript is ignored", "initScript", initScript)
-	}
-
 	migrator := postgres.NewMigrator(os.DirFS(migrationDir), nil)
 
 	pool, err := postgres.OpenPoolWithKey(ctx, dbcfg, migrator, key)

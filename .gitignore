@@ -27,3 +27,14 @@ gha-creds-*.json
 
 # Binary
 schemachecker
+schemachecker.exe
+*.exe
+
+# Go test and coverage artifacts
+*.test
+coverage.out
+coverage.html
+
+# Build output
+/dist/
+/build/

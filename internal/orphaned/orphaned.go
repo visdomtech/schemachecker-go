@@ -6,18 +6,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-
-	"github.com/visdomtech/schemachecker-go/internal/split"
 )
 
 // FromIndex validates that all files referenced in the index file exist
 // on disk, and that all files on disk are referenced from the index.
 func FromIndex(indexFile string) error {
-	content, err := split.ReadAll(indexFile)
+	data, err := os.ReadFile(indexFile)
 	if err != nil {
 		return fmt.Errorf("read index file: %w", err)
 	}
+	content := string(data)
 
 	root := filepath.Dir(indexFile)
 
@@ -101,13 +101,6 @@ func sortedKeys(m map[string]bool) []string {
 	for k := range m {
 		keys = append(keys, k)
 	}
-	// Simple sort
-	for i := 0; i < len(keys); i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[i] > keys[j] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
-		}
-	}
+	sort.Strings(keys)
 	return keys
 }

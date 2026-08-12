@@ -5,7 +5,6 @@ package split
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -45,74 +44,95 @@ func Dump(dumpFile string, destDir string) error {
 	defer f.Close()
 
 	buf := newDumpBuffer(destDir)
-	scanner := bufio.NewScanner(f)
-	// Increase scanner buffer for large SQL lines
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	reader := bufio.NewReaderSize(f, 1024*1024)
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		switch buf.state {
-		case stateEmpty:
-			if buf.processComment(line) {
-				// handled
-			} else if strings.TrimSpace(line) == "" {
-				// skip blank
-			} else {
-				buf.flushTo(stateSettings, "SETTINGS.sql", "-- Beginning of dump")
-				buf.append(line)
-			}
-		case stateSettings, stateDef, stateInsert:
-			if buf.processComment(line) {
-				// handled
-			} else {
-				buf.append(line)
-			}
-		case stateData:
-			if strings.HasPrefix(line, "COPY ") {
-				buf.state = stateCopy
-			} else if strings.HasPrefix(line, "INSERT ") {
-				buf.state = stateInsert
-			}
-			buf.append(line)
-		case stateCopy:
-			buf.append(line)
-			if line == `\.` {
-				if buf.numLines() == 4 { // 2 comments + COPY + \.
-					buf.setNewState(stateEmpty, "", "-- avoid creating empty data files")
-				} else {
-					buf.flushTo(stateEmpty, "", "")
-				}
-			}
-		case stateSeqSet:
-			if buf.processComment(line) {
-				// handled
-			} else if strings.HasPrefix(line, "SELECT pg_catalog.setval") {
-				if reSeqSetDefault.MatchString(line) {
-					buf.setNewState(stateEmpty, "", "-- avoid creating default seq files")
-				} else {
-					buf.append(line)
-				}
-			} else {
-				buf.append(line)
-			}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && len(line) == 0 {
+			break // EOF with no data
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan dump file: %w", err)
+		line = strings.TrimSuffix(line, "\n")
+
+		if flushErr := buf.processLine(line); flushErr != nil {
+			return fmt.Errorf("process line: %w", flushErr)
+		}
+
+		if err != nil {
+			break // EOF after reading last line (already processed above)
+		}
 	}
 
 	// flush final buffer
-	buf.flushTo(stateEmpty, "", "-- flushing last buff at end of file")
+	if err := buf.flushTo(stateEmpty, "", "-- flushing last buff at end of file"); err != nil {
+		return fmt.Errorf("final flush: %w", err)
+	}
+	return nil
+}
+
+// processLine processes a single line through the state machine.
+func (b *dumpBuffer) processLine(line string) error {
+	switch b.state {
+	case stateEmpty:
+		if err := b.processComment(line); err != nil {
+			return err
+		} else if !b.processed && strings.TrimSpace(line) == "" {
+			// skip blank
+		} else if !b.processed {
+			if err := b.flushTo(stateSettings, "SETTINGS.sql", "-- Beginning of dump"); err != nil {
+				return err
+			}
+			b.append(line)
+		}
+	case stateSettings, stateDef, stateInsert:
+		if err := b.processComment(line); err != nil {
+			return err
+		} else if !b.processed {
+			b.append(line)
+		}
+	case stateData:
+		if strings.HasPrefix(line, "COPY ") {
+			b.state = stateCopy
+		} else if strings.HasPrefix(line, "INSERT ") {
+			b.state = stateInsert
+		}
+		b.append(line)
+	case stateCopy:
+		b.append(line)
+		if line == `\.` {
+			if b.numLines() == 4 { // OBJDESC + COPY + blank + \. = empty COPY block
+				b.setNewState(stateEmpty, "", "-- avoid creating empty data files")
+			} else {
+				if err := b.flushTo(stateEmpty, "", ""); err != nil {
+					return err
+				}
+			}
+		}
+	case stateSeqSet:
+		if err := b.processComment(line); err != nil {
+			return err
+		} else if !b.processed {
+			if strings.HasPrefix(line, "SELECT pg_catalog.setval") {
+				if reSeqSetDefault.MatchString(line) {
+					b.setNewState(stateEmpty, "", "-- avoid creating default seq files")
+				} else {
+					b.append(line)
+				}
+			} else {
+				b.append(line)
+			}
+		}
+	}
 	return nil
 }
 
 // dumpBuffer accumulates lines and flushes them to per-object SQL files.
 type dumpBuffer struct {
-	destDir string
-	lines   []string
-	state   state
-	title   string
-	fname   string
+	destDir   string
+	lines     []string
+	state     state
+	title     string
+	fname     string
+	processed bool // set by processComment when line was handled as an object comment
 }
 
 func newDumpBuffer(destDir string) *dumpBuffer {
@@ -139,14 +159,16 @@ func (b *dumpBuffer) numLines() int {
 }
 
 // processComment checks if line is a pg_dump OBJDESC comment and, if so,
-// flushes the current buffer and starts a new file.
-func (b *dumpBuffer) processComment(line string) bool {
+// flushes the current buffer and starts a new file. Sets b.processed to
+// indicate whether the line was consumed.
+func (b *dumpBuffer) processComment(line string) error {
+	b.processed = false
 	if !strings.HasPrefix(line, "--") {
-		return false
+		return nil
 	}
 	match := reObjDesc.FindStringSubmatch(line)
 	if match == nil {
-		return false
+		return nil
 	}
 
 	result := make(map[string]string)
@@ -189,17 +211,18 @@ func (b *dumpBuffer) processComment(line string) bool {
 		name = result["name"]
 	}
 
-	filename := resolveFilename(objType, schema, name, refName)
+	filename := ResolveFilename(objType, schema, name, refName)
 
 	if len(filename) > 255 {
 		filename = filename[:251] + ".sql"
 	}
 
-	b.flushTo(b.state, filename, line)
-	return true
+	b.processed = true
+	return b.flushTo(b.state, filename, line)
 }
 
-func resolveFilename(objType, schema, name, refName string) string {
+// ResolveFilename returns the relative file path for a pg_dump object.
+func ResolveFilename(objType, schema, name, refName string) string {
 	if schema == "-" && objType == "EXTENSION" {
 		return fmt.Sprintf("EXTENSION/%s.sql", name)
 	}
@@ -233,7 +256,7 @@ func resolveFilename(objType, schema, name, refName string) string {
 	}
 }
 
-func (b *dumpBuffer) flushTo(newState state, newFname, newTitle string) {
+func (b *dumpBuffer) flushTo(newState state, newFname, newTitle string) error {
 	// Trim leading comments and blank lines
 	for len(b.lines) > 0 && (strings.TrimSpace(b.lines[0]) == "" || strings.HasPrefix(b.lines[0], "--")) {
 		b.lines = b.lines[1:]
@@ -245,63 +268,75 @@ func (b *dumpBuffer) flushTo(newState state, newFname, newTitle string) {
 
 	if len(b.lines) > 0 && b.fname != "" {
 		filePath := filepath.Join(b.destDir, b.fname)
+
+		// Path containment: ensure resolved path stays within destDir
+		absDest, _ := filepath.Abs(b.destDir)
+		absFile, _ := filepath.Abs(filePath)
+		if !strings.HasPrefix(absFile, absDest+string(os.PathSeparator)) {
+			fmt.Fprintf(os.Stderr, "warning: skipping file %q that escapes output directory\n", b.fname)
+			b.setNewState(newState, newFname, newTitle)
+			return nil
+		}
+
 		dirPath := filepath.Dir(filePath)
 
 		if err := os.MkdirAll(dirPath, 0o755); err != nil {
-			// best-effort: log and continue like Java version
-			fmt.Fprintf(os.Stderr, "warning: mkdir %s: %v\n", dirPath, err)
+			return fmt.Errorf("mkdir %s: %w", dirPath, err)
 		}
 
 		indexPath := filepath.Join(b.destDir, "index.txt")
 
 		// Create index.txt if it doesn't exist
 		if _, err := os.Stat(indexPath); os.IsNotExist(err) {
-			if f, err := os.Create(indexPath); err == nil {
-				f.Close()
+			idxF, err := os.Create(indexPath)
+			if err != nil {
+				return fmt.Errorf("create index.txt: %w", err)
 			}
+			idxF.Close()
 		}
 
+		// Atomically test-and-create the target file using O_EXCL
 		isNew := false
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		if f, err := os.OpenFile(filePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644); err == nil {
+			f.Close()
 			isNew = true
-			if f, err := os.Create(filePath); err == nil {
-				f.Close()
-			}
 		}
 
 		// Append to index when creating new file (preserves build order)
 		if isNew {
 			idxFile, err := os.OpenFile(indexPath, os.O_APPEND|os.O_WRONLY, 0o644)
-			if err == nil {
-				fmt.Fprintln(idxFile, b.fname)
+			if err != nil {
+				return fmt.Errorf("open index.txt for append: %w", err)
+			}
+			if _, err := fmt.Fprintln(idxFile, b.fname); err != nil {
 				idxFile.Close()
+				return fmt.Errorf("write index.txt: %w", err)
+			}
+			if err := idxFile.Close(); err != nil {
+				return fmt.Errorf("close index.txt: %w", err)
 			}
 		}
 
 		outFile, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY, 0o644)
-		if err == nil {
-			w := bufio.NewWriter(outFile)
-			for _, line := range b.lines {
-				fmt.Fprintln(w, line)
+		if err != nil {
+			return fmt.Errorf("open %s: %w", filePath, err)
+		}
+		w := bufio.NewWriter(outFile)
+		for _, line := range b.lines {
+			if _, err := fmt.Fprintln(w, line); err != nil {
+				outFile.Close()
+				return fmt.Errorf("write %s: %w", filePath, err)
 			}
-			w.Flush()
+		}
+		if err := w.Flush(); err != nil {
 			outFile.Close()
+			return fmt.Errorf("flush %s: %w", filePath, err)
+		}
+		if err := outFile.Close(); err != nil {
+			return fmt.Errorf("close %s: %w", filePath, err)
 		}
 	}
 
 	b.setNewState(newState, newFname, newTitle)
-}
-
-// ReadAll reads all content from a file, returning it as a string.
-func ReadAll(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
+	return nil
 }

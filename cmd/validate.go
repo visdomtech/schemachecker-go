@@ -15,7 +15,7 @@ import (
 // Usage: validate [schemaDefinitionMigrations] [incrementalMigrations] [outputDirectory]
 func RunValidate(args []string) error {
 	if len(args) != 4 {
-		return UsageError("Invalid command line arguments.\nUsage validate [schemaDefinitionMigrations] [incrementalMigarations] [outputDirectory]")
+		return UsageError("Invalid command line arguments.\nUsage validate [schemaDefinitionMigrations] [incrementalMigrations] [outputDirectory]")
 	}
 
 	schemaDefMigrations := args[1]
@@ -23,7 +23,7 @@ func RunValidate(args []string) error {
 	outputDir := args[3]
 
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
+		return checkererror.Wrap(checkererror.ExitInfra, err, "create output directory: %s", err)
 	}
 
 	exportedFromMigrations := filepath.Join(outputDir, "incrementalMigrations.sql")
@@ -33,13 +33,13 @@ func RunValidate(args []string) error {
 	ctx := context.Background()
 
 	fmt.Printf("Exporting incremental migrations [%s]\n", incrementalMigrations)
-	if err := pgdump.ProvisionAndDump(ctx, incrementalMigrations, exportedFromMigrations, "", schemaOnly); err != nil {
-		return err
+	if err := pgdump.ProvisionAndDump(ctx, incrementalMigrations, exportedFromMigrations, schemaOnly); err != nil {
+		return checkererror.Wrap(checkererror.ExitInfra, err, "dump incremental migrations: %s", err)
 	}
 
 	fmt.Printf("Exporting schema definition migrations [%s]\n", schemaDefMigrations)
-	if err := pgdump.ProvisionAndDump(ctx, schemaDefMigrations, exportedFromSchema, "", schemaOnly); err != nil {
-		return err
+	if err := pgdump.ProvisionAndDump(ctx, schemaDefMigrations, exportedFromSchema, schemaOnly); err != nil {
+		return checkererror.Wrap(checkererror.ExitInfra, err, "dump schema definition: %s", err)
 	}
 
 	diffResult, isSame, err := dirdiff.DiffFiles(
@@ -47,7 +47,7 @@ func RunValidate(args []string) error {
 		schemaDefMigrations, incrementalMigrations,
 	)
 	if err != nil {
-		return err
+		return checkererror.Wrap(checkererror.ExitInfra, err, "compare schemas: %s", err)
 	}
 
 	if isSame {
@@ -56,5 +56,5 @@ func RunValidate(args []string) error {
 	}
 
 	fmt.Println(diffResult)
-	return checkererror.New(1, "The schemas are DIFFERENT")
+	return checkererror.New(checkererror.ExitDiff, "The schemas are DIFFERENT")
 }

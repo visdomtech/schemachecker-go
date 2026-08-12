@@ -21,5 +21,5 @@ func RunDump(args []string) error {
 
 	fmt.Printf("Exporting migrations [%s]\n", migrations)
 
-	return pgdump.ProvisionAndDump(context.Background(), migrations, outputFile, "", schemaOnly)
+	return pgdump.ProvisionAndDump(context.Background(), migrations, outputFile, schemaOnly)
 }

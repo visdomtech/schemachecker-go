@@ -240,7 +240,8 @@ schemachecker dirdiff ./split-schema ./split-migrations
 | Code | Meaning |
 |------|---------|
 | `0` | Success |
-| `1` | Comparison found differences, or operation failed |
+| `1` | Comparison found differences (schemas differ, orphaned files found) |
+| `3` | Infrastructure failure (pg_dump, DB provisioning, I/O error) |
 | `99` | Invalid command-line arguments |
 
 ## Requirements
@@ -248,3 +249,13 @@ schemachecker dirdiff ./split-schema ./split-migrations
 - Go 1.26+
 - Docker (for testcontainer-based PostgreSQL provisioning used by `check`, `validate`, and `dump`)
 - `pg_dump` available in `PATH` (used by `check`, `validate`, and `dump`)
+
+## Differences from Java Version
+
+This Go port is a faithful migration of the original Java/Gradle schemachecker tool with the following intentional differences:
+
+- **CLI binary only** — the Gradle plugin (`SchemaCheckerPlugin`) is not ported. Use the CLI binary directly or wrap it in your build system.
+- **No `initScript` parameter** — the Java version accepted an optional init script for database initialization. The Go version uses Atlas migrations exclusively via `orcacommon/postgres`.
+- **Testcontainer provisioning** — PostgreSQL is provisioned via `orcacommon/postgres` testcontainers instead of direct JDBC connections. Control via `DB_URL_TEMPLATE` environment variable.
+- **Exit code `3` for infrastructure failures** — the Java version used exit code `1` for all failures. The Go version distinguishes schema differences (exit `1`) from infrastructure failures (exit `3`).
+- **Output directory cleanup** — the `check` command now cleans the output directory before running to prevent corruption from partial retries.

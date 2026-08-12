@@ -26,5 +26,5 @@ func PrintUsage() {
 
 // UsageError returns a checkererror.Error with exit code 99 for invalid arguments.
 func UsageError(msg string) error {
-	return checkererror.New(99, "%s\n%s", msg, usage)
+	return checkererror.New(checkererror.ExitUsage, "%s\n%s", msg, usage)
 }

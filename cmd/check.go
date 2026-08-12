@@ -24,8 +24,12 @@ func RunCheck(args []string) error {
 	incrementalMigrations := args[2]
 	outputDir := args[3]
 
+	// Clean output directory to prevent corruption from partial retries
+	if err := os.RemoveAll(outputDir); err != nil {
+		return checkererror.Wrap(checkererror.ExitInfra, err, "clean output directory: %s", err)
+	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
+		return checkererror.Wrap(checkererror.ExitInfra, err, "create output directory: %s", err)
 	}
 
 	ctx := context.Background()
@@ -35,41 +39,41 @@ func RunCheck(args []string) error {
 	fmt.Printf("Creating migration file from schema definition %s\n", schemaIndexFile)
 	schemaMigrationFolder := filepath.Join(outputDir, "schemaMigrations")
 	if err := os.MkdirAll(schemaMigrationFolder, 0o755); err != nil {
-		return fmt.Errorf("create schema migration folder: %w", err)
+		return checkererror.Wrap(checkererror.ExitInfra, err, "create schema migration folder: %s", err)
 	}
 	migrationFile := filepath.Join(schemaMigrationFolder, "V1.0.0__migrationFile.sql")
 	if err := merge.FromIndex(schemaIndexFile, migrationFile); err != nil {
-		return err
+		return checkererror.Wrap(checkererror.ExitInfra, err, "merge schema definition: %s", err)
 	}
 
 	// 2. Create a dump from the migration file
 	schemaDump := filepath.Join(outputDir, "schemaDump.sql")
-	if err := pgdump.ProvisionAndDump(ctx, schemaMigrationFolder, schemaDump, "", schemaOnly); err != nil {
-		return err
+	if err := pgdump.ProvisionAndDump(ctx, schemaMigrationFolder, schemaDump, schemaOnly); err != nil {
+		return checkererror.Wrap(checkererror.ExitInfra, err, "dump schema definition: %s", err)
 	}
 
 	// 3. Split the dump
 	schemaSplit := filepath.Join(outputDir, "schemasplit")
 	if err := split.Dump(schemaDump, schemaSplit); err != nil {
-		return err
+		return checkererror.Wrap(checkererror.ExitInfra, err, "split schema dump: %s", err)
 	}
 
 	// 4. Create a dump of the incremental migrations
 	incrementalDump := filepath.Join(outputDir, "incrementalDump.sql")
-	if err := pgdump.ProvisionAndDump(ctx, incrementalMigrations, incrementalDump, "", schemaOnly); err != nil {
-		return err
+	if err := pgdump.ProvisionAndDump(ctx, incrementalMigrations, incrementalDump, schemaOnly); err != nil {
+		return checkererror.Wrap(checkererror.ExitInfra, err, "dump incremental migrations: %s", err)
 	}
 
 	// 5. Split the incremental dump
 	incrementalSplit := filepath.Join(outputDir, "incrementalsplit")
 	if err := split.Dump(incrementalDump, incrementalSplit); err != nil {
-		return err
+		return checkererror.Wrap(checkererror.ExitInfra, err, "split incremental dump: %s", err)
 	}
 
 	// 6. Diff the two splits
 	differ, err := dirdiff.New(schemaSplit, incrementalSplit, nil)
 	if err != nil {
-		return err
+		return checkererror.Wrap(checkererror.ExitInfra, err, "compare schemas: %s", err)
 	}
 
 	if differ.IsSame() {
@@ -78,5 +82,5 @@ func RunCheck(args []string) error {
 	}
 
 	differ.Dump()
-	return checkererror.New(1, "The schemas are not the same")
+	return checkererror.New(checkererror.ExitDiff, "The schemas are not the same")
 }

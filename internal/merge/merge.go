@@ -3,54 +3,88 @@
 package merge
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/visdomtech/schemachecker-go/internal/split"
 )
 
 // FromIndex reads the index file and writes all referenced SQL files
 // concatenated into the migration file.
 func FromIndex(indexFile, migrationFile string) error {
-	content, err := split.ReadAll(indexFile)
+	data, err := os.ReadFile(indexFile)
 	if err != nil {
 		return fmt.Errorf("read index file: %w", err)
 	}
+	content := string(data)
 
 	root := filepath.Dir(indexFile)
+	absRoot, _ := filepath.Abs(root)
 
 	out, err := os.Create(migrationFile)
 	if err != nil {
 		return fmt.Errorf("create migration file: %w", err)
 	}
-	defer out.Close()
+
+	w := bufio.NewWriter(out)
 
 	for _, line := range strings.Split(strings.TrimSuffix(content, "\n"), "\n") {
 		if strings.HasPrefix(line, "--") {
-			fmt.Fprintln(out, line)
+			if _, err := fmt.Fprintln(w, line); err != nil {
+				out.Close()
+				return fmt.Errorf("write comment: %w", err)
+			}
 		} else if strings.TrimSpace(line) == "" {
-			fmt.Fprintln(out, line)
+			if _, err := fmt.Fprintln(w, line); err != nil {
+				out.Close()
+				return fmt.Errorf("write blank line: %w", err)
+			}
 		} else {
 			trimmed := strings.TrimSpace(line)
 			filePath := filepath.Join(root, trimmed)
 
+			// Path containment: ensure resolved path stays within root
+			absPath, _ := filepath.Abs(filePath)
+			if !strings.HasPrefix(absPath, absRoot+string(os.PathSeparator)) && absPath != absRoot {
+				out.Close()
+				return fmt.Errorf("index entry %q escapes base directory %s", trimmed, root)
+			}
+
 			if err := requireFileReadable(filePath, indexFile); err != nil {
+				out.Close()
 				return err
 			}
 
-			fileContent, err := split.ReadAll(filePath)
+			fileData, err := os.ReadFile(filePath)
 			if err != nil {
+				out.Close()
 				return fmt.Errorf("read referenced file %s: %w", filePath, err)
 			}
 
-			fmt.Fprintf(out, "\n-- including %s\n", line)
-			fmt.Fprintln(out, fileContent)
+			if _, err := fmt.Fprintf(w, "\n-- including %s\n", line); err != nil {
+				out.Close()
+				return fmt.Errorf("write including header: %w", err)
+			}
+			if _, err := fmt.Fprintln(w, string(fileData)); err != nil {
+				out.Close()
+				return fmt.Errorf("write file content: %w", err)
+			}
 		}
 	}
 
-	fmt.Fprintln(out, "SET check_function_bodies = true; -- reset check_function_bodies")
+	if _, err := fmt.Fprintln(w, "SET check_function_bodies = true; -- reset check_function_bodies"); err != nil {
+		out.Close()
+		return fmt.Errorf("write footer: %w", err)
+	}
+
+	if err := w.Flush(); err != nil {
+		out.Close()
+		return fmt.Errorf("flush migration file: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close migration file: %w", err)
+	}
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -11,7 +12,7 @@ import (
 func main() {
 	if len(os.Args) < 2 {
 		cmd.PrintUsage()
-		os.Exit(1)
+		os.Exit(checkererror.ExitUsage)
 	}
 
 	args := os.Args[1:]
@@ -35,15 +36,16 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", args[0])
 		cmd.PrintUsage()
-		os.Exit(1)
+		os.Exit(checkererror.ExitUsage)
 	}
 
 	if err != nil {
-		if ce, ok := err.(*checkererror.Error); ok {
+		var ce *checkererror.Error
+		if errors.As(err, &ce) {
 			fmt.Fprintf(os.Stderr, "Err: %s\n", ce.Message)
 			os.Exit(ce.ExitCode)
 		}
 		fmt.Fprintf(os.Stderr, "Err: %s\n", err)
-		os.Exit(1)
+		os.Exit(checkererror.ExitInfra)
 	}
 }

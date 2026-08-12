@@ -9,8 +9,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/visdomtech/schemachecker-go/internal/split"
-
 	"github.com/pmezard/go-difflib/difflib"
 )
 
@@ -132,15 +130,23 @@ func (d *FileTreeDiffer) check() error {
 	return nil
 }
 
+func readFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 func (d *FileTreeDiffer) diffFile(file string) (*Delta, error) {
 	leftPath := filepath.Join(d.Left, file)
 	rightPath := filepath.Join(d.Right, file)
 
-	leftContent, err := split.ReadAll(leftPath)
+	leftContent, err := readFile(leftPath)
 	if err != nil {
 		return nil, err
 	}
-	rightContent, err := split.ReadAll(rightPath)
+	rightContent, err := readFile(rightPath)
 	if err != nil {
 		return nil, err
 	}
@@ -257,18 +263,30 @@ func splitLines(content string) []string {
 
 // DiffFiles compares two files and returns a unified diff string.
 // This is used by the validate command for comparing dump files.
+// It normalizes PSQL meta-commands (e.g. \restrict, \unrestrict) so that
+// differences in their arguments are ignored, matching the directory-diff behavior.
 func DiffFiles(file1, file2, label1, label2 string) (string, bool, error) {
-	content1, err := split.ReadAll(file1)
+	content1, err := readFile(file1)
 	if err != nil {
 		return "", false, err
 	}
-	content2, err := split.ReadAll(file2)
+	content2, err := readFile(file2)
 	if err != nil {
 		return "", false, err
 	}
 
-	text1 := splitLines(content1)
-	text2 := splitLines(content2)
+	raw1 := splitLines(content1)
+	raw2 := splitLines(content2)
+
+	// Normalize PSQL meta commands for parity with directory diff
+	text1 := make([]string, len(raw1))
+	text2 := make([]string, len(raw2))
+	for i, l := range raw1 {
+		text1[i] = normalizePSQLMetaCommand(l)
+	}
+	for i, l := range raw2 {
+		text2[i] = normalizePSQLMetaCommand(l)
+	}
 
 	ud := difflib.UnifiedDiff{
 		A:        text1,
