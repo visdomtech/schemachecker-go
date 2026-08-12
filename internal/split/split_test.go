@@ -19,6 +19,8 @@ func TestResolveFilename(t *testing.T) {
 		{"EXTENSION", "-", "plpgsql", "", "EXTENSION/plpgsql.sql"},
 		{"COMMENT", "-", "ext_comment", "", "EXTENSION/ext_comment.sql"},
 		{"ACL", "-", "public", "", "SCHEMAS/public.sql"},
+		{"SCHEMA", "-", "public", "", "SCHEMAS/public.sql"},
+		{"TYPE", "-", "sometype", "", "SCHEMAS/sometype.sql"},
 
 		// RefName-based types
 		{"CONSTRAINT", "public", "users_pkey", "users", "public/TABLE/users.sql"},
@@ -579,5 +581,17 @@ func TestDumpWithMerge(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(destDir, "public/TRIGGER/users.sql")); !os.IsNotExist(err) {
 		t.Error("TRIGGER file should be removed after merge")
+	}
+
+	// Empty directories should be removed after merge
+	for _, dir := range []string{"public/INDEX", "public/TRIGGER", "public/DEFAULT", "public/FK_CONSTRAINT", "public/CONSTRAINT"} {
+		if _, err := os.Stat(filepath.Join(destDir, dir)); !os.IsNotExist(err) {
+			t.Errorf("empty directory %s should be removed after merge", dir)
+		}
+	}
+
+	// Non-empty directories should still exist
+	if _, err := os.Stat(filepath.Join(destDir, "public/TABLE")); os.IsNotExist(err) {
+		t.Error("TABLE directory should still exist")
 	}
 }

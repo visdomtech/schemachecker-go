@@ -44,6 +44,9 @@ func MergeTableObjects(destDir string) error {
 		}
 	}
 
+	// Remove directories left empty after merging.
+	removeEmptyDirs(destDir)
+
 	// Update index.txt to reflect merged files.
 	return updateIndexAfterMerge(destDir)
 }
@@ -158,6 +161,28 @@ func appendContent(dstPath string, content []byte) error {
 	}
 	_, err = f.Write(content)
 	return err
+}
+
+// removeEmptyDirs walks destDir bottom-up and removes any empty directories.
+func removeEmptyDirs(destDir string) {
+	// Collect directories bottom-up so children are visited before parents.
+	var dirs []string
+	filepath.Walk(destDir, func(path string, info os.FileInfo, _ error) error {
+		if info.IsDir() && path != destDir {
+			dirs = append(dirs, path)
+		}
+		return nil
+	})
+	// Reverse for bottom-up removal.
+	for i, j := 0, len(dirs)-1; i < j; i, j = i+1, j-1 {
+		dirs[i], dirs[j] = dirs[j], dirs[i]
+	}
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err == nil && len(entries) == 0 {
+			os.Remove(dir)
+		}
+	}
 }
 
 // updateIndexAfterMerge rewrites index.txt to remove entries that no longer

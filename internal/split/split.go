@@ -247,7 +247,8 @@ func ResolveFilename(objType, schema, name, refName string) string {
 	if schema == "-" && objType == "COMMENT" {
 		return fmt.Sprintf("EXTENSION/%s.sql", name)
 	}
-	if schema == "-" && objType == "ACL" {
+	// Any remaining schema-less objects (SCHEMA, ACL, etc.) go to SCHEMAS/.
+	if schema == "-" {
 		return fmt.Sprintf("SCHEMAS/%s.sql", name)
 	}
 	switch objType {
