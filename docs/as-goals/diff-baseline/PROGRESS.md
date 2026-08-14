@@ -4,25 +4,24 @@
 
 - **Goal file:** docs/as-goals/diff-baseline.md
 - **Current phase:** 4
-- **Iteration:** 0/10
+- **Iteration:** 1/10
 
 ## Gate Dashboard
 
 | Gate | Status | Last Evaluated |
 |------|--------|----------------|
-| Diff command implementation | Pending | - |
-| Build & test verification | Pending | - |
+| Diff command implementation | ✅ Pass | Iteration 1 |
+| Build & test verification | ✅ Pass | Iteration 1 |
 
 ## Iteration Log
 
 | Iteration | Decision | Gates | Commits | Artifacts |
-|-----------|----------|-------|---------|-----------|
-| - | - | - | - | - |
+|-----------|----------|-------|---------|----------|
+| 1 | DONE | 2/2 | `0777d61` | [plan](1/plan.md) / [review](1/review.md) / [manifest](1/evidence-manifest.md) |
 
 ## Open Defects
 
 None.
 
 ## Next Actions
-- [ ] Phase 3: Define exit gates
-- [ ] Phase 4: Begin iteration 1
+- [x] DONE — all gates passed
