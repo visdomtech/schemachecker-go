@@ -43,6 +43,9 @@ func DumpFromPool(ctx context.Context, pool *pgxpool.Pool, opts Options) error {
 	// The split can handle privileges, but it's not needed for our usecase
 	args = append(args, "--no-privileges")
 
+	// We don't need owner statements in the dump
+	args = append(args, "--no-owner")
+
 	// We never want flyway_schema_history / atlas_schema_revisions which is outside of our control
 	args = append(args, "--exclude-table=flyway_schema_history")
 	args = append(args, "--exclude-table=atlas_schema_revisions")
