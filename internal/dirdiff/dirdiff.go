@@ -98,7 +98,7 @@ func (d *FileTreeDiffer) Summary() string {
 // psqlMetaCommands lists the psql meta commands that should be treated as
 // equivalent when both sides start with the same command.
 //
-// Defense-in-depth: pgdump.stripPsqlMetaCommands is the primary layer that
+// Defense-in-depth: pgdump.stripDumpBoilerplate is the primary layer that
 // removes these lines from dump output at dump time. This normalization exists
 // as a safety net for non-pgdump input paths (e.g., the dirdiff subcommand
 // comparing arbitrary directories that were not produced by pgdump).
