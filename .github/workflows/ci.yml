@@ -6,7 +6,6 @@ on:
       - 'release-please-*'
 permissions:
   contents: "read"
-  repository-projects: "read"
 jobs:
   build-and-test:
     runs-on: ubuntu-latest

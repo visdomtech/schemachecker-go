@@ -15,7 +15,7 @@ vars:
     -X main.Version={{.VERSION}}
     -X main.GitSHA={{.GIT_SHA}}
   DIST: dist
-  RELEASE_VERSION: '{{.VERSION | default "dev"}}'
+  RELEASE_VERSION: '{{.VERSION}}'
   RELEASE_LDFLAGS: -s -w -X main.Version={{.RELEASE_VERSION}} -X main.GitSHA={{.GIT_SHA}}
   SIGN_IDENTITY: MyLocalCodeSign
 
@@ -34,11 +34,9 @@ tasks:
       - task: go:test
 
   default:
-    desc: Full CI pipeline (build, vet, test)
+    desc: Alias for ci
     cmds:
-      - task: go:build
-      - task: go:vet
-      - task: go:test
+      - task: ci
 
   # ── Go ──────────────────────────────────────────────────────────────
 

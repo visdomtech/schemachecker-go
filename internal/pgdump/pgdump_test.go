@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestStripPsqlMetaCommands(t *testing.T) {
+func TestStripDumpBoilerplate(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "dump.sql")
 	input := "CREATE TABLE t (id int);\n\\restrict\nCOPY t FROM stdin;\n\\unrestrict\nCREATE TABLE t2 (id int);\n"
@@ -32,7 +32,7 @@ func TestStripPsqlMetaCommands(t *testing.T) {
 	}
 }
 
-func TestStripPsqlMetaCommands_NoOp(t *testing.T) {
+func TestStripDumpBoilerplate_NoOp(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "dump.sql")
 	input := "CREATE TABLE t (id int);\nSELECT 1;\n"
@@ -54,7 +54,7 @@ func TestStripPsqlMetaCommands_NoOp(t *testing.T) {
 	}
 }
 
-func TestStripPsqlMetaCommands_EmptyFile(t *testing.T) {
+func TestStripDumpBoilerplate_EmptyFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "dump.sql")
 	if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
@@ -75,7 +75,7 @@ func TestStripPsqlMetaCommands_EmptyFile(t *testing.T) {
 	}
 }
 
-func TestStripPsqlMetaCommands_NoOverMatch(t *testing.T) {
+func TestStripDumpBoilerplate_NoOverMatch(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "dump.sql")
 	// Ensure lines that start with \restrict but are not exact matches are preserved

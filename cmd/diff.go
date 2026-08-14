@@ -159,10 +159,16 @@ func appendSearchPathRestore(path string) error {
 	if err != nil {
 		return fmt.Errorf("open %q: %w", path, err)
 	}
-	defer f.Close()
 	if _, err := fmt.Fprintln(f, "\n-- Restore search_path cleared by pg_dump so Atlas can write revision records"); err != nil {
+		f.Close()
 		return err
 	}
-	_, err = fmt.Fprintln(f, "SET search_path TO public;")
-	return err
+	if _, err := fmt.Fprintln(f, "SET search_path TO public;"); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %q: %w", path, err)
+	}
+	return nil
 }
