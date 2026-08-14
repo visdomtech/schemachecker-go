@@ -29,9 +29,16 @@ func RunCheck(args []string) error {
 	if err != nil {
 		return checkererror.Wrap(checkererror.ExitUsage, err, "resolve output directory: %s", err)
 	}
+	// Resolve symlinks so the blocklist comparison matches what RemoveAll will actually touch.
+	// If the path doesn't exist yet, EvalSymlinks may fail — fall back to the unresolved path.
+	resolved := absOut
+	if r, err := filepath.EvalSymlinks(absOut); err == nil {
+		resolved = r
+	}
 	cwd, _ := os.Getwd()
 	home, _ := os.UserHomeDir()
-	if absOut == "/" || absOut == cwd || absOut == home {
+	dangerous := map[string]bool{"/": true, cwd: true, home: true, "/etc": true, "/usr": true, "/var": true, "/tmp": true, "/boot": true}
+	if dangerous[resolved] {
 		return checkererror.New(checkererror.ExitUsage, "refusing to remove dangerous output directory: %s", outputDir)
 	}
 

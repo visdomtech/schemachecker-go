@@ -123,7 +123,7 @@ func stripPsqlMetaCommands(path string) error {
 	writer := bufio.NewWriter(tmp)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, `\restrict`) || strings.HasPrefix(line, `\unrestrict`) {
+		if line == `\restrict` || line == `\unrestrict` {
 			continue
 		}
 		if _, err := fmt.Fprintln(writer, line); err != nil {
