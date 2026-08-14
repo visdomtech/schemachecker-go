@@ -36,5 +36,8 @@ coverage.out
 coverage.html
 
 # Build output
-/dist/
 /build/
+/dist/
+
+# Task-generated version override (CI writes this; never commit)
+version.txt
