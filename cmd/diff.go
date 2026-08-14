@@ -63,6 +63,17 @@ func RunDiff(args []string) error {
 	if err := copyFile(baselineFile, baselineMigrationFile); err != nil {
 		return checkererror.Wrap(checkererror.ExitInfra, err, "copy baseline file: %s", err)
 	}
+	// pg_dump emits SELECT pg_catalog.set_config('search_path', '', false)
+	// which clears the search path. Atlas then cannot find its own
+	// atlas_schema_revisions table when writing the revision record.
+	// Restore search_path at the end of the baseline SQL.
+	if err := appendSearchPathRestore(baselineMigrationFile); err != nil {
+		return checkererror.Wrap(checkererror.ExitInfra, err, "append search_path restore: %s", err)
+	}
+	// Atlas requires a checksum file to validate the migration directory
+	if err := pgdump.WriteAtlasSum(baselineMigrationFolder); err != nil {
+		return checkererror.Wrap(checkererror.ExitInfra, err, "write atlas checksum: %s", err)
+	}
 
 	// NOTE: ProvisionAndDump provisions a separate PostgreSQL testcontainer per call
 	// (keyed by migration directory). Both containers run concurrently until process exit.
@@ -134,6 +145,30 @@ func copyFile(src, dst string) (err error) {
 
 	if _, err := io.Copy(out, in); err != nil {
 		return fmt.Errorf("copy %q to %q: %w", src, dst, err)
+	}
+	return nil
+}
+
+// appendSearchPathRestore appends "SET search_path TO public;" to a SQL file.
+// pg_dump output contains SELECT pg_catalog.set_config('search_path', '', false)
+// which clears the search path. When Atlas applies such a migration, it can no
+// longer find its atlas_schema_revisions table. Appending this restore ensures
+// the search path is valid when Atlas writes the revision record.
+func appendSearchPathRestore(path string) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open %q: %w", path, err)
+	}
+	if _, err := fmt.Fprintln(f, "\n-- Restore search_path cleared by pg_dump so Atlas can write revision records"); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := fmt.Fprintln(f, "SET search_path TO public;"); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %q: %w", path, err)
 	}
 	return nil
 }

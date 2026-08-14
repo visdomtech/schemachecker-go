@@ -63,6 +63,15 @@ func RunCheck(args []string) error {
 	if err := merge.FromIndex(schemaIndexFile, migrationFile); err != nil {
 		return checkererror.Wrap(checkererror.ExitInfra, err, "merge schema definition: %s", err)
 	}
+	// pg_dump output may clear search_path via set_config, which prevents
+	// Atlas from finding its atlas_schema_revisions table.
+	if err := appendSearchPathRestore(migrationFile); err != nil {
+		return checkererror.Wrap(checkererror.ExitInfra, err, "append search_path restore: %s", err)
+	}
+	// Atlas requires a checksum file to validate the migration directory
+	if err := pgdump.WriteAtlasSum(schemaMigrationFolder); err != nil {
+		return checkererror.Wrap(checkererror.ExitInfra, err, "write atlas checksum: %s", err)
+	}
 
 	// 2. Create a dump from the migration file
 	schemaDump := filepath.Join(outputDir, "schemaDump.sql")

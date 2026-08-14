@@ -9,9 +9,12 @@ import (
 	"github.com/visdomtech/schemachecker-go/internal/checkererror"
 )
 
-// version is set at build time via -ldflags "-X main.version=...".
-// Falls back to "dev" if not set.
-var version = "dev"
+// Version and GitSHA are set at build time via -ldflags.
+// Falls back to "dev" / "unknown" if not set.
+var (
+	Version = "dev"
+	GitSHA  = "unknown"
+)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -23,7 +26,7 @@ func main() {
 
 	// Handle --version / -v before subcommand dispatch
 	if args[0] == "--version" || args[0] == "-v" {
-		fmt.Println(version)
+		fmt.Printf("%s (%s)\n", Version, GitSHA)
 		return
 	}
 
