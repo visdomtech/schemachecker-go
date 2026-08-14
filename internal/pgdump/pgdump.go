@@ -2,6 +2,7 @@
 package pgdump
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/caarlos0/env/v11"
@@ -42,6 +44,9 @@ func DumpFromPool(ctx context.Context, pool *pgxpool.Pool, opts Options) error {
 
 	// The split can handle privileges, but it's not needed for our usecase
 	args = append(args, "--no-privileges")
+
+	// We don't need owner statements in the dump
+	args = append(args, "--no-owner")
 
 	// We never want flyway_schema_history / atlas_schema_revisions which is outside of our control
 	args = append(args, "--exclude-table=flyway_schema_history")
@@ -90,7 +95,59 @@ func DumpFromPool(ctx context.Context, pool *pgxpool.Pool, opts Options) error {
 		return fmt.Errorf("close dump output file: %w", err)
 	}
 
+	if err := stripPsqlMetaCommands(opts.OutputFile); err != nil {
+		return fmt.Errorf("strip psql meta commands: %w", err)
+	}
+
 	return nil
+}
+
+// stripPsqlMetaCommands removes \restrict and \unrestrict lines from the dump
+// file. pg_dump emits these psql meta-commands around COPY blocks when row
+// level security policies exist; we don't need them in our output.
+func stripPsqlMetaCommands(path string) error {
+	in, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".pgdump-strip-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+
+	scanner := bufio.NewScanner(in)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	writer := bufio.NewWriter(tmp)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == `\restrict` || line == `\unrestrict` {
+			continue
+		}
+		if _, err := fmt.Fprintln(writer, line); err != nil {
+			tmp.Close()
+			os.Remove(tmpName)
+			return err
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := writer.Flush(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+
+	return os.Rename(tmpName, path)
 }
 
 // ProvisionAndDump creates a testcontainer PostgreSQL, runs migrations from

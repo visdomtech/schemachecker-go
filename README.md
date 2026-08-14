@@ -28,6 +28,7 @@ Where command:
     - merge
     - orphaned
     - dump
+    - diff
     - dirdiff
 Options:
     --version, -v    Print version and exit
@@ -196,7 +197,7 @@ schemachecker dump [migrations] [outputFile]
 | `migrations` | Path to the directory containing migration SQL files. |
 | `outputFile` | Path where the pg_dump output is written. |
 
-The pg_dump is run with `--no-privileges` and excludes `flyway_schema_history` and `atlas_schema_revisions` tables.
+The pg_dump is run with `--no-privileges` and `--no-owner`, and excludes `flyway_schema_history` and `atlas_schema_revisions` tables.
 
 **Exit codes:** `0` on success, `99` on invalid arguments.
 
@@ -204,6 +205,30 @@ The pg_dump is run with `--no-privileges` and excludes `flyway_schema_history` a
 
 ```sh
 schemachecker dump ./migrations ./build/schema.sql
+```
+
+---
+
+### `diff`
+
+Wraps a baseline SQL file into a migration folder, dumps both the baseline and an incremental migrations directory via PostgreSQL, splits them into per-object files, and compares the results with unified diff output.
+
+```
+schemachecker diff [migrationsDir] [baselineFile] [outputDir]
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `migrationsDir` | Path to the directory containing incremental migration SQL files. |
+| `baselineFile` | Path to the baseline SQL file to compare against. |
+| `outputDir` | Path where intermediate and output files are written. Created if it does not exist. |
+
+**Exit codes:** `0` if schemas match, `1` if they differ, `99` on invalid arguments.
+
+**Example:**
+
+```sh
+schemachecker diff ./migrations ./baseline.sql ./build/diff-output
 ```
 
 ---
@@ -240,8 +265,8 @@ schemachecker dirdiff ./split-schema ./split-migrations
 
 | Variable | Used By | Description |
 |----------|---------|-------------|
-| `DUMP_DATA` | `check`, `validate`, `dump` | When **unset** (default), dumps are schema-only (`pg_dump --schema-only`). Set to any value to include data in dumps. |
-| `DB_URL_TEMPLATE` | `check`, `validate`, `dump` | Database URL template for orcacommon. Defaults to `postgres:tc://...` which provisions a testcontainer. Override to connect to an existing PostgreSQL instance. |
+| `DUMP_DATA` | `check`, `validate`, `diff`, `dump` | When **unset** (default), dumps are schema-only (`pg_dump --schema-only`). Set to any value to include data in dumps. |
+| `DB_URL_TEMPLATE` | `check`, `validate`, `diff`, `dump` | Database URL template for orcacommon. Defaults to `postgres:tc://...` which provisions a testcontainer. Override to connect to an existing PostgreSQL instance. |
 
 ## Exit Codes
 
@@ -255,8 +280,8 @@ schemachecker dirdiff ./split-schema ./split-migrations
 ## Requirements
 
 - Go 1.26+
-- Docker (for testcontainer-based PostgreSQL provisioning used by `check`, `validate`, and `dump`)
-- `pg_dump` available in `PATH` (used by `check`, `validate`, and `dump`)
+- Docker (for testcontainer-based PostgreSQL provisioning used by `check`, `validate`, `diff`, and `dump`)
+- `pg_dump` available in `PATH` (used by `check`, `validate`, `diff`, and `dump`)
 
 ## Differences from Java Version
 

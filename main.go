@@ -41,6 +41,8 @@ func main() {
 		err = cmd.RunOrphaned(args)
 	case "dirdiff":
 		err = cmd.RunDirDiff(args)
+	case "diff":
+		err = cmd.RunDiff(args)
 	case "dump":
 		err = cmd.RunDump(args)
 	default:

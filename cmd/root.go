@@ -16,6 +16,7 @@ Where command:
     - merge
     - orphaned
     - dump
+    - diff
     - dirdiff
 Options:
     --version, -v    Print version and exit
