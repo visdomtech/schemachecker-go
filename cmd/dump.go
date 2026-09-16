@@ -16,7 +16,7 @@ import (
 //
 // Without --split, outputPath is a single SQL file.
 // With --split, outputPath is a directory; the dump is split into
-// per-object files with merge (table objects inlined) enabled.
+// per-object files (no merge, preserving raw pg_dump representation).
 func RunDump(args []string) error {
 	if len(args) < 3 || len(args) > 4 {
 		return UsageError("Invalid command line arguments.\nUsage dump [migrations] [outputPath] [--split]")
@@ -50,7 +50,7 @@ func RunDump(args []string) error {
 }
 
 // dumpAndSplit dumps migrations to a temporary SQL file, then splits it
-// into per-object files under outputDir with merge enabled.
+// into per-object files under outputDir.
 func dumpAndSplit(ctx context.Context, migrations, outputDir string, schemaOnly bool) error {
 	// Clear the output directory to avoid appending to stale files.
 	if err := cleanOutputDir(outputDir); err != nil {
@@ -73,5 +73,5 @@ func dumpAndSplit(ctx context.Context, migrations, outputDir string, schemaOnly 
 
 	fmt.Printf("Splitting into [%s]\n", outputDir)
 
-	return split.Dump(tmpPath, outputDir, split.Options{Merge: true})
+	return split.Dump(tmpPath, outputDir, split.Options{})
 }

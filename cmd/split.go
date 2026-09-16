@@ -7,8 +7,8 @@ import (
 // RunSplit executes the split subcommand.
 // Usage: split [schemaExportFile] [outputDir]
 //
-// Table-associated objects (INDEX, TRIGGER, DEFAULT, CONSTRAINT,
-// FK_CONSTRAINT) are always merged into the TABLE file.
+// Splits a pg_dump SQL file into per-object files without merge,
+// preserving the raw pg_dump representation for round-trip consistency.
 func RunSplit(args []string) error {
 	if len(args) != 3 {
 		return UsageError("Invalid command line arguments.\nUsage split [schemaExportFile] [outputDir]")
@@ -19,5 +19,5 @@ func RunSplit(args []string) error {
 		return err
 	}
 
-	return split.Dump(args[1], outputDir, split.Options{Merge: true})
+	return split.Dump(args[1], outputDir, split.Options{})
 }
