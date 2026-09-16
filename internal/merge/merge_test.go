@@ -620,6 +620,52 @@ func TestFromIndex_PreservesBlankLinesInFunctions(t *testing.T) {
 	}
 }
 
+func TestFromIndex_PreservesBlankLinesInNamedDollarQuote(t *testing.T) {
+	// Named dollar-quote tags ($function$...$function$) must also preserve
+	// blank lines inside the function body.
+	tmpDir := t.TempDir()
+
+	funcSQL := strings.Join([]string{
+		"CREATE FUNCTION orca.compute() RETURNS integer",
+		"    LANGUAGE plpgsql",
+		"    AS $function$",
+		"DECLARE",
+		"    result integer;",
+		"BEGIN",
+		"    SELECT count(*) INTO result FROM orca.items;",
+		"",
+		"    RETURN result;",
+		"END;",
+		"$function$;",
+	}, "\n") + "\n"
+
+	funcFile := filepath.Join(tmpDir, "compute.sql")
+	if err := os.WriteFile(funcFile, []byte(funcSQL), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	indexFile := filepath.Join(tmpDir, "index.txt")
+	if err := os.WriteFile(indexFile, []byte("compute.sql\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	outFile := filepath.Join(tmpDir, "out.sql")
+	if err := FromIndex(indexFile, outFile); err != nil {
+		t.Fatalf("FromIndex failed: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(data)
+
+	// The blank line between SELECT and RETURN must be preserved.
+	if !strings.Contains(output, "SELECT count(*) INTO result FROM orca.items;\n\n    RETURN result;") {
+		t.Errorf("blank line inside named dollar-quote was lost, got:\n%s", output)
+	}
+}
+
 func TestRequireFileReadable(t *testing.T) {
 	tmpDir := t.TempDir()
 

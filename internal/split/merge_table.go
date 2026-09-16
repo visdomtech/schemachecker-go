@@ -199,8 +199,6 @@ var reOwnedBy = regexp.MustCompile(`(?i)OWNED\s+BY\s+([\w."]+)`)
 // Anchored to line start so "NO CYCLE" / "NO MINVALUE" don't false-match.
 var reSeqNonStandard = regexp.MustCompile(`(?im)^\s*(CYCLE|MINVALUE\s+-?\d|MAXVALUE\s+-?\d)`)
 
-// reIdentitySeq matches ALTER TABLE [schema.]table ALTER COLUMN col ADD GENERATED ALWAYS AS IDENTITY
-var reIdentitySeq = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+([\w."]+)\s+ALTER\s+COLUMN\s+(\w+)\s+ADD\s+GENERATED\s+ALWAYS\s+AS\s+IDENTITY`)
 
 // inlineSequences scans SEQUENCE/ for table-owned standard sequences, converts
 // the owning table's column to BIGSERIAL, removes the nextval DEFAULT, and
@@ -314,24 +312,6 @@ func parseSequenceOwnedBy(content string) (table, column string) {
 	}
 }
 
-// parseIdentitySequence extracts table and column from
-// ALTER TABLE [schema.]table ALTER COLUMN col ADD GENERATED ALWAYS AS IDENTITY
-func parseIdentitySequence(content string) (table, column string) {
-	match := reIdentitySeq.FindStringSubmatch(content)
-	if match == nil {
-		return "", ""
-	}
-	parts := splitDotRef(match[1])
-	col := stripQuotes(match[2])
-	switch len(parts) {
-	case 2: // schema.table
-		return parts[1], col
-	case 1: // table
-		return parts[0], col
-	default:
-		return "", ""
-	}
-}
 
 // isStandardSequence returns true if the CREATE SEQUENCE can be expressed
 // as BIGSERIAL (no CYCLE, no explicit MINVALUE/MAXVALUE).
