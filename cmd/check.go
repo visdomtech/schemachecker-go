@@ -15,39 +15,36 @@ import (
 
 // RunCheck executes the check subcommand.
 // Usage: check [schemaDefinitionIndex] [incrementalMigrations] [outputDirectory]
+//
+// If outputDirectory is omitted, a temporary directory is created and
+// automatically cleaned up when the command finishes.
 func RunCheck(args []string) error {
-	if len(args) != 4 {
+	if len(args) < 3 || len(args) > 4 {
 		return UsageError("Invalid command line arguments.\nUsage check [schemaDefinitionIndex] [incrementalMigrations] [outputDirectory]")
 	}
 
 	schemaIndexFile := args[1]
 	incrementalMigrations := args[2]
-	outputDir := args[3]
 
-	// Safety check: refuse to remove dangerous directories
-	absOut, err := filepath.Abs(outputDir)
-	if err != nil {
-		return checkererror.Wrap(checkererror.ExitUsage, err, "resolve output directory: %s", err)
+	var outputDir string
+	var autoCleanup bool
+	if len(args) == 4 {
+		outputDir = args[3]
+		// Safety check and clean output directory
+		if err := cleanOutputDir(outputDir); err != nil {
+			return err
+		}
+	} else {
+		tmpDir, err := os.MkdirTemp("", "schemachecker-check-*")
+		if err != nil {
+			return checkererror.Wrap(checkererror.ExitInfra, err, "create temp directory: %s", err)
+		}
+		outputDir = tmpDir
+		autoCleanup = true
+		fmt.Printf("Using temporary output directory [%s]\n", outputDir)
 	}
-	// Resolve symlinks so the blocklist comparison matches what RemoveAll will actually touch.
-	// If the path doesn't exist yet, EvalSymlinks may fail — fall back to the unresolved path.
-	resolved := absOut
-	if r, err := filepath.EvalSymlinks(absOut); err == nil {
-		resolved = r
-	}
-	cwd, _ := os.Getwd()
-	home, _ := os.UserHomeDir()
-	dangerous := map[string]bool{"/": true, cwd: true, home: true, "/etc": true, "/usr": true, "/var": true, "/tmp": true, "/boot": true}
-	if dangerous[resolved] {
-		return checkererror.New(checkererror.ExitUsage, "refusing to remove dangerous output directory: %s", outputDir)
-	}
-
-	// Clean output directory to prevent corruption from partial retries
-	if err := os.RemoveAll(outputDir); err != nil {
-		return checkererror.Wrap(checkererror.ExitInfra, err, "clean output directory: %s", err)
-	}
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return checkererror.Wrap(checkererror.ExitInfra, err, "create output directory: %s", err)
+	if autoCleanup {
+		defer os.RemoveAll(outputDir)
 	}
 
 	ctx := context.Background()

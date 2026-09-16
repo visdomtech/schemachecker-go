@@ -185,16 +185,22 @@ func FromIndex(indexFile, migrationFile string) error {
 }
 
 // splitSQLBlocks splits SQL content into statement blocks separated by blank
-// lines. Each block is a contiguous run of non-blank lines joined with "\n".
+// lines. Blank lines inside dollar-quoted strings ($$...$$,  $tag$...$tag$)
+// are preserved as part of the enclosing block, not treated as separators.
 func splitSQLBlocks(content string) []string {
 	content = strings.TrimSuffix(content, "\n")
 	lines := strings.Split(content, "\n")
 
 	var blocks []string
 	var current []string
+	inDollarQuote := false
+	var dollarTag string // the active dollar-quote tag (e.g. "$$" or "$function$")
 
 	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
+		// Track dollar-quote state: scan for $tag$ delimiters.
+		inDollarQuote, dollarTag = updateDollarQuoteState(line, inDollarQuote, dollarTag)
+
+		if strings.TrimSpace(line) == "" && !inDollarQuote {
 			if len(current) > 0 {
 				blocks = append(blocks, strings.Join(current, "\n"))
 				current = nil
@@ -207,6 +213,65 @@ func splitSQLBlocks(content string) []string {
 		blocks = append(blocks, strings.Join(current, "\n"))
 	}
 	return blocks
+}
+
+// updateDollarQuoteState scans a line for dollar-quote delimiters and
+// returns the updated (inDollarQuote, activeTag) state. A dollar-quote
+// delimiter is $$ or $tag$ where tag is a word. When inside a quote,
+// only the matching tag closes it.
+func updateDollarQuoteState(line string, inQuote bool, activeTag string) (bool, string) {
+	remaining := line
+	for {
+		idx := strings.Index(remaining, "$")
+		if idx < 0 {
+			break
+		}
+		remaining = remaining[idx:]
+
+		// Try to match a dollar-quote delimiter starting at $.
+		tag := matchDollarTag(remaining)
+		if tag == "" {
+			// Not a delimiter, skip past this $.
+			remaining = remaining[1:]
+			continue
+		}
+
+		if !inQuote {
+			inQuote = true
+			activeTag = tag
+		} else if tag == activeTag {
+			inQuote = false
+			activeTag = ""
+		}
+		remaining = remaining[len(tag):]
+	}
+	return inQuote, activeTag
+}
+
+// matchDollarTag checks if s starts with a dollar-quote delimiter.
+// Returns the delimiter string (e.g. "$$" or "$func$") or "" if not a tag.
+func matchDollarTag(s string) string {
+	if len(s) < 2 || s[0] != '$' {
+		return ""
+	}
+	// $$ (empty tag)
+	if s[1] == '$' {
+		return "$$"
+	}
+	// $tag$ where tag is [a-zA-Z_][a-zA-Z0-9_]*
+	if !(s[1] >= 'a' && s[1] <= 'z' || s[1] >= 'A' && s[1] <= 'Z' || s[1] == '_') {
+		return ""
+	}
+	for i := 2; i < len(s); i++ {
+		c := s[i]
+		if c == '$' {
+			return s[:i+1]
+		}
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_') {
+			return ""
+		}
+	}
+	return ""
 }
 
 // isFKBlock reports whether a SQL statement block is a foreign key constraint.
