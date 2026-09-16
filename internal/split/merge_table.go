@@ -226,14 +226,14 @@ func inlineSequences(destDir, schemaName string) error {
 		}
 		content := string(data)
 
-		// Try OWNED BY first, then IDENTITY pattern.
+		// Only inline OWNED BY sequences (traditional bigserial pattern).
+		// IDENTITY columns (GENERATED ALWAYS AS IDENTITY) are preserved
+		// as-is so the round-trip matches the migrations side.
 		tableName, columnName := parseSequenceOwnedBy(content)
 		if tableName == "" {
-			tableName, columnName = parseIdentitySequence(content)
-		}
-		if tableName == "" {
-			slog.Debug("skipping standalone sequence", "schema", schemaName, "sequence", entry.Name())
-			continue // standalone sequence
+			slog.Debug("skipping non-owned sequence (identity or standalone)",
+				"schema", schemaName, "sequence", entry.Name())
+			continue
 		}
 
 		// Only inline standard sequences (no CYCLE, no explicit MIN/MAX).

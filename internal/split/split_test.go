@@ -820,8 +820,8 @@ func TestMergeInlineSequenceDefaultInTableFile(t *testing.T) {
 
 func TestMergeInlineIdentitySequence(t *testing.T) {
 	// PostgreSQL IDENTITY columns (GENERATED ALWAYS AS IDENTITY) are emitted
-	// by pg_dump as separate SEQUENCE objects. The merge should convert them
-	// to bigserial and remove the SEQUENCE file.
+	// by pg_dump as separate SEQUENCE objects. The merge must NOT convert
+	// them to bigserial — the IDENTITY representation is preserved.
 	tmpDir := t.TempDir()
 	destDir := filepath.Join(tmpDir, "output")
 
@@ -864,19 +864,88 @@ func TestMergeInlineIdentitySequence(t *testing.T) {
 		t.Fatalf("MergeTableObjects failed: %v", err)
 	}
 
-	// TABLE file should have bigserial
+	// TABLE file must NOT have bigserial — IDENTITY columns are preserved.
 	data, err := os.ReadFile(filepath.Join(destDir, "orca/TABLE/policy_drafts.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	sql := string(data)
-	if !strings.Contains(sql, "bigserial") {
-		t.Errorf("draft_id should be bigserial, got:\n%s", sql)
+	if strings.Contains(sql, "bigserial") {
+		t.Errorf("IDENTITY column must NOT be converted to bigserial, got:\n%s", sql)
 	}
 
-	// SEQUENCE file should be removed
-	if _, err := os.Stat(filepath.Join(destDir, "orca/SEQUENCE/policy_drafts_draft_id_seq.sql")); !os.IsNotExist(err) {
-		t.Error("IDENTITY SEQUENCE file should be removed after inlining")
+	// SEQUENCE file must be preserved.
+	if _, err := os.Stat(filepath.Join(destDir, "orca/SEQUENCE/policy_drafts_draft_id_seq.sql")); os.IsNotExist(err) {
+		t.Error("IDENTITY SEQUENCE file must NOT be removed after merge")
+	}
+}
+
+func TestMergePreservesIdentitySequence(t *testing.T) {
+	// PostgreSQL IDENTITY columns (GENERATED ALWAYS AS IDENTITY) must NOT be
+	// converted to bigserial. The IDENTITY representation must be preserved
+	// so that the round-trip (split → merge → dump → split) matches the
+	// migrations side which also uses IDENTITY.
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "output")
+
+	for _, d := range []string{"orca/TABLE", "orca/SEQUENCE"} {
+		if err := os.MkdirAll(filepath.Join(destDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tableContent := strings.Join([]string{
+		"CREATE TABLE orca.policy_drafts (",
+		"    draft_id bigint NOT NULL,",
+		"    workspace_id text NOT NULL,",
+		"    title text DEFAULT ''::text NOT NULL",
+		");",
+		"",
+		"ALTER TABLE ONLY orca.policy_drafts",
+		"    ADD CONSTRAINT policy_drafts_pkey PRIMARY KEY (draft_id);",
+	}, "\n") + "\n"
+
+	seqContent := strings.Join([]string{
+		"ALTER TABLE orca.policy_drafts ALTER COLUMN draft_id ADD GENERATED ALWAYS AS IDENTITY (",
+		"    SEQUENCE NAME orca.policy_drafts_draft_id_seq",
+		"    START WITH 1",
+		"    INCREMENT BY 1",
+		"    NO MINVALUE",
+		"    NO MAXVALUE",
+		"    CACHE 1",
+		");",
+	}, "\n") + "\n"
+
+	files := map[string]string{
+		"orca/TABLE/policy_drafts.sql":                    tableContent,
+		"orca/SEQUENCE/policy_drafts_draft_id_seq.sql":    seqContent,
+	}
+	for relPath, content := range files {
+		if err := os.WriteFile(filepath.Join(destDir, relPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := MergeTableObjects(destDir); err != nil {
+		t.Fatalf("MergeTableObjects failed: %v", err)
+	}
+
+	// TABLE file must NOT have bigserial — IDENTITY columns are preserved.
+	data, err := os.ReadFile(filepath.Join(destDir, "orca/TABLE/policy_drafts.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(data)
+	if strings.Contains(sql, "bigserial") {
+		t.Errorf("IDENTITY column must NOT be converted to bigserial, got:\n%s", sql)
+	}
+	if !strings.Contains(sql, "bigint NOT NULL") {
+		t.Errorf("IDENTITY column must remain bigint NOT NULL, got:\n%s", sql)
+	}
+
+	// SEQUENCE file must be preserved (contains the IDENTITY definition).
+	if _, err := os.Stat(filepath.Join(destDir, "orca/SEQUENCE/policy_drafts_draft_id_seq.sql")); os.IsNotExist(err) {
+		t.Error("IDENTITY SEQUENCE file must NOT be removed")
 	}
 }
 
