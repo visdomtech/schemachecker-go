@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/visdomtech/schemachecker-go/compare/v1.0.0...v1.0.1) (2026-09-16)
+
+
+### Bug Fixes
+
+* use RELEASE_PAT in release-please to trigger release workflow ([#7](https://github.com/visdomtech/schemachecker-go/issues/7)) ([f9e9065](https://github.com/visdomtech/schemachecker-go/commit/f9e90652343fdd7a2fffb9a4c9c8046e2199920e))
+
 ## 1.0.0 (2026-09-16)
 
 
