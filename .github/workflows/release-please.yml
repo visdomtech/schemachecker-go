@@ -16,5 +16,5 @@ jobs:
           # Must use a PAT (not GITHUB_TOKEN) so that the tag push
           # triggers the Release workflow. GITHUB_TOKEN events are
           # blocked from triggering other workflows.
-          token: ${{ secrets.RELEASE_PAT }}
+          token: ${{ secrets.VISDOM_BOT_CICD_WRITER }}
           release-type: simple
