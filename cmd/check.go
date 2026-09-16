@@ -15,18 +15,36 @@ import (
 
 // RunCheck executes the check subcommand.
 // Usage: check [schemaDefinitionIndex] [incrementalMigrations] [outputDirectory]
+//
+// If outputDirectory is omitted, a temporary directory is created and
+// automatically cleaned up when the command finishes.
 func RunCheck(args []string) error {
-	if len(args) != 4 {
+	if len(args) < 3 || len(args) > 4 {
 		return UsageError("Invalid command line arguments.\nUsage check [schemaDefinitionIndex] [incrementalMigrations] [outputDirectory]")
 	}
 
 	schemaIndexFile := args[1]
 	incrementalMigrations := args[2]
-	outputDir := args[3]
 
-	// Safety check and clean output directory
-	if err := cleanOutputDir(outputDir); err != nil {
-		return err
+	var outputDir string
+	var autoCleanup bool
+	if len(args) == 4 {
+		outputDir = args[3]
+		// Safety check and clean output directory
+		if err := cleanOutputDir(outputDir); err != nil {
+			return err
+		}
+	} else {
+		tmpDir, err := os.MkdirTemp("", "schemachecker-check-*")
+		if err != nil {
+			return checkererror.Wrap(checkererror.ExitInfra, err, "create temp directory: %s", err)
+		}
+		outputDir = tmpDir
+		autoCleanup = true
+		fmt.Printf("Using temporary output directory [%s]\n", outputDir)
+	}
+	if autoCleanup {
+		defer os.RemoveAll(outputDir)
 	}
 
 	ctx := context.Background()
