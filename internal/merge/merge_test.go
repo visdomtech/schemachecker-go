@@ -141,12 +141,76 @@ func TestFromIndex_CommentsAndBlanks(t *testing.T) {
 		t.Error("should preserve final comment")
 	}
 
+	// Verify comment ordering: leading comments before file content, trailing after
+	firstComment := strings.Index(content, "-- This is a comment")
+	anotherComment := strings.Index(content, "-- Another comment")
+	fileHeader := strings.Index(content, "-- including init.sql")
+	finalComment := strings.Index(content, "-- Final comment")
+	if firstComment > anotherComment || anotherComment > fileHeader {
+		t.Error("leading comments should appear before file content")
+	}
+	if fileHeader > finalComment {
+		t.Error("trailing comment should appear after file content")
+	}
+
 	// Verify SQL file is included
 	if !strings.Contains(content, "-- including init.sql") {
 		t.Error("should include init.sql")
 	}
 	if !strings.Contains(content, "CREATE TABLE test") {
 		t.Error("should contain SQL content")
+	}
+}
+
+func TestFromIndex_InterleavedComments(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create SQL files
+	sql1 := filepath.Join(tmpDir, "users.sql")
+	sql2 := filepath.Join(tmpDir, "orders.sql")
+	if err := os.WriteFile(sql1, []byte("CREATE TABLE users (id INT);"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sql2, []byte("CREATE TABLE orders (id INT);"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Index with comments interleaved between file entries
+	indexContent := "-- Users section\nusers.sql\n-- Orders section\norders.sql\n"
+	indexFile := filepath.Join(tmpDir, "index.txt")
+	if err := os.WriteFile(indexFile, []byte(indexContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	outputFile := filepath.Join(tmpDir, "output.sql")
+	if err := FromIndex(indexFile, outputFile); err != nil {
+		t.Fatalf("FromIndex failed: %v", err)
+	}
+
+	data, err := os.ReadFile(outputFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Verify ordering: "-- Users section" before users.sql content,
+	// "-- Orders section" before orders.sql content
+	usersComment := strings.Index(content, "-- Users section")
+	usersFile := strings.Index(content, "-- including users.sql")
+	ordersComment := strings.Index(content, "-- Orders section")
+	ordersFile := strings.Index(content, "-- including orders.sql")
+
+	if usersComment == -1 || usersFile == -1 || ordersComment == -1 || ordersFile == -1 {
+		t.Fatal("expected all comments and file headers to be present")
+	}
+	if usersComment > usersFile {
+		t.Error("Users section comment should appear before users.sql file header")
+	}
+	if usersFile > ordersComment {
+		t.Error("users.sql content should appear before Orders section comment")
+	}
+	if ordersComment > ordersFile {
+		t.Error("Orders section comment should appear before orders.sql file header")
 	}
 }
 

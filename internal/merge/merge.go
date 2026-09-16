@@ -10,11 +10,13 @@ import (
 	"strings"
 )
 
-// fileBlock holds a parsed SQL file's content separated into non-FK and FK blocks.
+// fileBlock holds a parsed SQL file's content separated into non-FK and FK blocks,
+// along with any index-level comments that preceded the file entry.
 type fileBlock struct {
-	line     string   // original index line (the relative path)
-	nonFK    []string // non-FK statement blocks (CREATE TABLE, PK, UNIQUE, etc.)
-	fkBlocks []string // FK constraint blocks (ALTER TABLE ... FOREIGN KEY ...)
+	line          string   // original index line (the relative path)
+	headerComments []string // index comments/blanks that appeared before this entry
+	nonFK         []string // non-FK statement blocks (CREATE TABLE, PK, UNIQUE, etc.)
+	fkBlocks      []string // FK constraint blocks (ALTER TABLE ... FOREIGN KEY ...)
 }
 
 // FromIndex reads the index file and writes all referenced SQL files
@@ -42,20 +44,23 @@ func FromIndex(indexFile, migrationFile string) error {
 
 	w := bufio.NewWriter(out)
 
-	// indexComments collects non-file lines (comments, blanks) that appear
-	// in the index before any file entries, preserving their order.
-	var indexComments []string
+	// pendingComments accumulates index-level comment/blank lines until
+	// the next file entry claims them as its header.
+	var pendingComments []string
+	// trailingComments holds comment/blank lines that appear after the
+	// last file entry (or when there are no file entries at all).
+	var trailingComments []string
 	// fileEntries collects parsed file blocks in index order.
 	var fileEntries []fileBlock
 
 	// Phase 1: parse index and read all referenced files.
 	for _, line := range strings.Split(strings.TrimSuffix(content, "\n"), "\n") {
 		if strings.HasPrefix(line, "--") {
-			indexComments = append(indexComments, line)
+			pendingComments = append(pendingComments, line)
 			continue
 		}
 		if strings.TrimSpace(line) == "" {
-			indexComments = append(indexComments, line)
+			pendingComments = append(pendingComments, line)
 			continue
 		}
 
@@ -93,22 +98,23 @@ func FromIndex(indexFile, migrationFile string) error {
 		}
 
 		fileEntries = append(fileEntries, fileBlock{
-			line:     line,
-			nonFK:    nonFK,
-			fkBlocks: fk,
+			line:           line,
+			headerComments: pendingComments,
+			nonFK:          nonFK,
+			fkBlocks:       fk,
 		})
+		pendingComments = nil
 	}
+	trailingComments = pendingComments
 
-	// Phase 2: write index-level comments and blanks.
-	for _, c := range indexComments {
-		if _, err := fmt.Fprintln(w, c); err != nil {
-			out.Close()
-			return fmt.Errorf("write index comment: %w", err)
-		}
-	}
-
-	// Phase 3: write non-FK content for each file.
+	// Phase 2: write non-FK content for each file, with associated header comments.
 	for _, entry := range fileEntries {
+		for _, c := range entry.headerComments {
+			if _, err := fmt.Fprintln(w, c); err != nil {
+				out.Close()
+				return fmt.Errorf("write header comment: %w", err)
+			}
+		}
 		if len(entry.nonFK) == 0 {
 			continue
 		}
@@ -124,7 +130,7 @@ func FromIndex(indexFile, migrationFile string) error {
 		}
 	}
 
-	// Phase 4: write deferred FK constraints.
+	// Phase 3: write deferred FK constraints.
 	var hasFK bool
 	for _, entry := range fileEntries {
 		if len(entry.fkBlocks) > 0 {
@@ -151,6 +157,14 @@ func FromIndex(indexFile, migrationFile string) error {
 					return fmt.Errorf("write FK content: %w", err)
 				}
 			}
+		}
+	}
+
+	// Write trailing index comments (comments after the last file entry).
+	for _, c := range trailingComments {
+		if _, err := fmt.Fprintln(w, c); err != nil {
+			out.Close()
+			return fmt.Errorf("write trailing comment: %w", err)
 		}
 	}
 
