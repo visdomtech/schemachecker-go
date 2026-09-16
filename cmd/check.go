@@ -24,30 +24,9 @@ func RunCheck(args []string) error {
 	incrementalMigrations := args[2]
 	outputDir := args[3]
 
-	// Safety check: refuse to remove dangerous directories
-	absOut, err := filepath.Abs(outputDir)
-	if err != nil {
-		return checkererror.Wrap(checkererror.ExitUsage, err, "resolve output directory: %s", err)
-	}
-	// Resolve symlinks so the blocklist comparison matches what RemoveAll will actually touch.
-	// If the path doesn't exist yet, EvalSymlinks may fail — fall back to the unresolved path.
-	resolved := absOut
-	if r, err := filepath.EvalSymlinks(absOut); err == nil {
-		resolved = r
-	}
-	cwd, _ := os.Getwd()
-	home, _ := os.UserHomeDir()
-	dangerous := map[string]bool{"/": true, cwd: true, home: true, "/etc": true, "/usr": true, "/var": true, "/tmp": true, "/boot": true}
-	if dangerous[resolved] {
-		return checkererror.New(checkererror.ExitUsage, "refusing to remove dangerous output directory: %s", outputDir)
-	}
-
-	// Clean output directory to prevent corruption from partial retries
-	if err := os.RemoveAll(outputDir); err != nil {
-		return checkererror.Wrap(checkererror.ExitInfra, err, "clean output directory: %s", err)
-	}
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return checkererror.Wrap(checkererror.ExitInfra, err, "create output directory: %s", err)
+	// Safety check and clean output directory
+	if err := cleanOutputDir(outputDir); err != nil {
+		return err
 	}
 
 	ctx := context.Background()

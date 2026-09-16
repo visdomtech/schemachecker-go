@@ -14,5 +14,10 @@ func RunSplit(args []string) error {
 		return UsageError("Invalid command line arguments.\nUsage split [schemaExportFile] [outputDir]")
 	}
 
-	return split.Dump(args[1], args[2], split.Options{Merge: true})
+	outputDir := args[2]
+	if err := cleanOutputDir(outputDir); err != nil {
+		return err
+	}
+
+	return split.Dump(args[1], outputDir, split.Options{Merge: true})
 }

@@ -52,6 +52,11 @@ func RunDump(args []string) error {
 // dumpAndSplit dumps migrations to a temporary SQL file, then splits it
 // into per-object files under outputDir with merge enabled.
 func dumpAndSplit(ctx context.Context, migrations, outputDir string, schemaOnly bool) error {
+	// Clear the output directory to avoid appending to stale files.
+	if err := cleanOutputDir(outputDir); err != nil {
+		return err
+	}
+
 	tmpFile, err := os.CreateTemp("", "schemachecker-dump-*.sql")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
