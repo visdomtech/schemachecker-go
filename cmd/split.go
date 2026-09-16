@@ -5,19 +5,14 @@ import (
 )
 
 // RunSplit executes the split subcommand.
-// Usage: split [schemaExportFile] [outputDir] [--merge]
+// Usage: split [schemaExportFile] [outputDir]
+//
+// Table-associated objects (INDEX, TRIGGER, DEFAULT, CONSTRAINT,
+// FK_CONSTRAINT) are always merged into the TABLE file.
 func RunSplit(args []string) error {
-	if len(args) < 3 || len(args) > 4 {
-		return UsageError("Invalid command line arguments.\nUsage split [schemaExportFile] [outputDir] [--merge]")
+	if len(args) != 3 {
+		return UsageError("Invalid command line arguments.\nUsage split [schemaExportFile] [outputDir]")
 	}
 
-	opts := split.Options{}
-	if len(args) == 4 {
-		if args[3] != "--merge" {
-			return UsageError("Invalid command line arguments.\nUsage split [schemaExportFile] [outputDir] [--merge]")
-		}
-		opts.Merge = true
-	}
-
-	return split.Dump(args[1], args[2], opts)
+	return split.Dump(args[1], args[2], split.Options{Merge: true})
 }
