@@ -10,8 +10,21 @@ import (
 	"strings"
 )
 
+// fileBlock holds a parsed SQL file's content separated into non-FK and FK blocks.
+type fileBlock struct {
+	line     string   // original index line (the relative path)
+	nonFK    []string // non-FK statement blocks (CREATE TABLE, PK, UNIQUE, etc.)
+	fkBlocks []string // FK constraint blocks (ALTER TABLE ... FOREIGN KEY ...)
+}
+
 // FromIndex reads the index file and writes all referenced SQL files
 // concatenated into the migration file.
+//
+// Foreign key constraints (ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY)
+// are deferred to a second pass after all other SQL. This preserves the
+// ordering guarantee from pg_dump, where all CREATE TABLE statements
+// precede any cross-table FK constraints, regardless of the order in
+// which files are listed in the index.
 func FromIndex(indexFile, migrationFile string) error {
 	data, err := os.ReadFile(indexFile)
 	if err != nil {
@@ -29,52 +42,119 @@ func FromIndex(indexFile, migrationFile string) error {
 
 	w := bufio.NewWriter(out)
 
+	// indexComments collects non-file lines (comments, blanks) that appear
+	// in the index before any file entries, preserving their order.
+	var indexComments []string
+	// fileEntries collects parsed file blocks in index order.
+	var fileEntries []fileBlock
+
+	// Phase 1: parse index and read all referenced files.
 	for _, line := range strings.Split(strings.TrimSuffix(content, "\n"), "\n") {
 		if strings.HasPrefix(line, "--") {
-			if _, err := fmt.Fprintln(w, line); err != nil {
-				out.Close()
-				return fmt.Errorf("write comment: %w", err)
-			}
-		} else if strings.TrimSpace(line) == "" {
-			if _, err := fmt.Fprintln(w, line); err != nil {
-				out.Close()
-				return fmt.Errorf("write blank line: %w", err)
-			}
-		} else {
-			trimmed := strings.TrimSpace(line)
-			// Clean the entry to normalize . and .. before joining
-			trimmed = filepath.Clean(trimmed)
-			filePath := filepath.Join(root, trimmed)
+			indexComments = append(indexComments, line)
+			continue
+		}
+		if strings.TrimSpace(line) == "" {
+			indexComments = append(indexComments, line)
+			continue
+		}
 
-			// Path containment: ensure resolved path stays within root
-			absPath, _ := filepath.Abs(filePath)
-			if !strings.HasPrefix(absPath, absRoot+string(os.PathSeparator)) {
-				out.Close()
-				return fmt.Errorf("index entry %q escapes base directory %s", trimmed, root)
-			}
+		trimmed := strings.TrimSpace(line)
+		trimmed = filepath.Clean(trimmed)
+		filePath := filepath.Join(root, trimmed)
 
-			if err := requireFileReadable(filePath, indexFile); err != nil {
-				out.Close()
-				return err
-			}
+		// Path containment: ensure resolved path stays within root
+		absPath, _ := filepath.Abs(filePath)
+		if !strings.HasPrefix(absPath, absRoot+string(os.PathSeparator)) {
+			out.Close()
+			return fmt.Errorf("index entry %q escapes base directory %s", trimmed, root)
+		}
 
-			fileData, err := os.ReadFile(filePath)
-			if err != nil {
-				out.Close()
-				return fmt.Errorf("read referenced file %s: %w", filePath, err)
-			}
+		if err := requireFileReadable(filePath, indexFile); err != nil {
+			out.Close()
+			return err
+		}
 
-			if _, err := fmt.Fprintf(w, "\n-- including %s\n", line); err != nil {
-				out.Close()
-				return fmt.Errorf("write including header: %w", err)
+		fileData, err := os.ReadFile(filePath)
+		if err != nil {
+			out.Close()
+			return fmt.Errorf("read referenced file %s: %w", filePath, err)
+		}
+
+		// Separate file content into non-FK and FK blocks.
+		blocks := splitSQLBlocks(string(fileData))
+		var nonFK, fk []string
+		for _, block := range blocks {
+			if isFKBlock(block) {
+				fk = append(fk, block)
+			} else {
+				nonFK = append(nonFK, block)
 			}
-			if _, err := fmt.Fprintln(w, string(fileData)); err != nil {
+		}
+
+		fileEntries = append(fileEntries, fileBlock{
+			line:     line,
+			nonFK:    nonFK,
+			fkBlocks: fk,
+		})
+	}
+
+	// Phase 2: write index-level comments and blanks.
+	for _, c := range indexComments {
+		if _, err := fmt.Fprintln(w, c); err != nil {
+			out.Close()
+			return fmt.Errorf("write index comment: %w", err)
+		}
+	}
+
+	// Phase 3: write non-FK content for each file.
+	for _, entry := range fileEntries {
+		if len(entry.nonFK) == 0 {
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "\n-- including %s\n", entry.line); err != nil {
+			out.Close()
+			return fmt.Errorf("write including header: %w", err)
+		}
+		for _, block := range entry.nonFK {
+			if _, err := fmt.Fprintln(w, block); err != nil {
 				out.Close()
 				return fmt.Errorf("write file content: %w", err)
 			}
 		}
 	}
 
+	// Phase 4: write deferred FK constraints.
+	var hasFK bool
+	for _, entry := range fileEntries {
+		if len(entry.fkBlocks) > 0 {
+			hasFK = true
+			break
+		}
+	}
+	if hasFK {
+		if _, err := fmt.Fprintln(w, "\n-- Deferred foreign key constraints"); err != nil {
+			out.Close()
+			return fmt.Errorf("write FK section header: %w", err)
+		}
+		for _, entry := range fileEntries {
+			if len(entry.fkBlocks) == 0 {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "\n-- including %s\n", entry.line); err != nil {
+				out.Close()
+				return fmt.Errorf("write FK including header: %w", err)
+			}
+			for _, block := range entry.fkBlocks {
+				if _, err := fmt.Fprintln(w, block); err != nil {
+					out.Close()
+					return fmt.Errorf("write FK content: %w", err)
+				}
+			}
+		}
+	}
+
+	// Footer
 	if _, err := fmt.Fprintln(w, "SET check_function_bodies = true; -- reset check_function_bodies"); err != nil {
 		out.Close()
 		return fmt.Errorf("write footer: %w", err)
@@ -88,6 +168,37 @@ func FromIndex(indexFile, migrationFile string) error {
 		return fmt.Errorf("close migration file: %w", err)
 	}
 	return nil
+}
+
+// splitSQLBlocks splits SQL content into statement blocks separated by blank
+// lines. Each block is a contiguous run of non-blank lines joined with "\n".
+func splitSQLBlocks(content string) []string {
+	content = strings.TrimSuffix(content, "\n")
+	lines := strings.Split(content, "\n")
+
+	var blocks []string
+	var current []string
+
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			if len(current) > 0 {
+				blocks = append(blocks, strings.Join(current, "\n"))
+				current = nil
+			}
+		} else {
+			current = append(current, line)
+		}
+	}
+	if len(current) > 0 {
+		blocks = append(blocks, strings.Join(current, "\n"))
+	}
+	return blocks
+}
+
+// isFKBlock reports whether a SQL statement block is a foreign key constraint.
+// It checks for the presence of both ADD CONSTRAINT and FOREIGN KEY keywords.
+func isFKBlock(block string) bool {
+	return strings.Contains(block, "ADD CONSTRAINT") && strings.Contains(block, "FOREIGN KEY")
 }
 
 func requireFileReadable(path, indexFile string) error {
