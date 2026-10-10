@@ -34,7 +34,7 @@ cmd/                     Subcommand handlers (one file per command) + shared uti
   check.go               RunCheck — merge schema index, dump both sides, split, dirdiff
   diff.go                RunDiff — wrap baseline SQL, dump both sides, split, dirdiff
   validate.go            RunValidate — dump two migration dirs, compare SQL files
-  split.go               RunSplit — split pg_dump into per-object files
+  split.go               RunSplit — split pg_dump into per-object files, child objects merged into TABLE files
   merge.go               RunMerge — concatenate index-referenced SQL files
   orphaned.go            RunOrphaned — check index vs filesystem consistency
   dump.go                RunDump — provision DB, run migrations, pg_dump
@@ -45,7 +45,7 @@ internal/
   merge/                 Index file parsing and SQL concatenation
   orphaned/              Index-to-filesystem consistency checking
   pgdump/                PostgreSQL provisioning, migration execution, pg_dump invocation, post-processing
-  split/                 pg_dump SQL splitting into per-object files by schema/type
+  split/                 pg_dump SQL splitting into per-object files by schema/type; table-owned INDEX, TRIGGER, DEFAULT and FK_CONSTRAINT SQL is merged into the TABLE file, and index.txt is pruned to match
 ```
 
 ## Coding Conventions

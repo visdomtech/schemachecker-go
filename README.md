@@ -88,7 +88,12 @@ schemachecker validate ./schema-migrations ./incremental-migrations ./build/outp
 
 ### `split`
 
-Splits a single pg_dump SQL file into per-object SQL files organized by schema and object type. Produces a directory tree and an `index.txt` that records the file creation order (useful for replay).
+Splits a single pg_dump SQL file into per-object SQL files organized by schema and object type. Produces a directory tree and an `index.txt` that records the file creation order.
+
+Table-owned child objects are always inlined into the file of the table that owns
+them, so `INDEX`, `TRIGGER`, `DEFAULT` and `FK_CONSTRAINT` SQL ends up inside
+`<schema>/TABLE/<table>.sql` and the per-type child files are removed. The merged
+tree is the only output shape; there is no option in either direction.
 
 ```
 schemachecker split [schemaExportFile] [outputDir]
@@ -97,9 +102,33 @@ schemachecker split [schemaExportFile] [outputDir]
 | Parameter | Description |
 |-----------|-------------|
 | `schemaExportFile` | Path to the pg_dump output SQL file to split. |
-| `outputDir` | Path to the directory where split files are written. Created if it does not exist. |
+| `outputDir` | Path to the directory where split files are written. It is cleaned before splitting, so dangerous paths (`/`, the current directory, the home directory) are refused. |
 
-The output directory structure mirrors PostgreSQL object types:
+**`index.txt` is a creation order, not a replay order.** The index records the
+order in which files were created, which is useful for enumerating the tree — but
+because FK constraints now live inside the child table's own file, an
+`ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY …` statement can be emitted before the
+referenced table's file appears in the index. Sequential replay with something like
+`psql -f` over `index.txt` order is therefore no longer topologically safe. The
+in-repo consumer `merge.FromIndex` is unaffected: it splits each file into
+statement blocks and defers every FK block to a second pass, which is what `check`
+and the `merge` subcommand use.
+
+A second, known case: when a sequence is **not** folded into `bigserial`, merging
+moves its `ALTER TABLE … ALTER COLUMN … SET DEFAULT nextval(…)` from `DEFAULT/` into
+the owning `TABLE/<table>.sql`, which appears **earlier** in `index.txt` than the
+`SEQUENCE/` file it refers to. Sequential replay then fails with
+`ERROR: relation "<schema>_<table>_seq" does not exist` and the column silently
+loses its default. This affects `IDENTITY`-adjacent and non-standard
+(`CYCLE`/`MINVALUE`/`MAXVALUE`) sequences, is a pre-existing defect unrelated to
+the bigserial matching fix, and is **not** fixed in this release — see
+[`docs/caveat.md`](docs/caveat.md) §N1. Use `schemachecker merge`
+rather than `psql -f` over `index.txt`.
+
+The output directory structure mirrors PostgreSQL object types. The listing below
+is from an actual run over a dump containing tables, sequences, indexes, triggers,
+constraints, policies, a function, a view and table data — regenerate it for
+yourself with `find <outputDir> | sort`:
 
 ```
 outputDir/
@@ -107,26 +136,64 @@ outputDir/
 ├── SETTINGS.sql
 ├── EXTENSION/
 │   └── plpgsql.sql
+├── SCHEMAS/
+│   └── orca.sql
 ├── public/
 │   ├── TABLE/
 │   │   ├── users.sql
 │   │   └── orders.sql
-│   ├── SEQUENCE/
-│   │   └── users_id_seq.sql
-│   ├── FUNCTION/
-│   │   └── my_func.sql
-│   ├── CONSTRAINT/
+│   ├── POLICY/
 │   │   └── users.sql
-│   ├── FK_CONSTRAINT/
-│   │   └── orders.sql
-│   ├── INDEX/
-│   ├── DEFAULT/
-│   ├── TRIGGER/
-│   └── DATA/
-└── ...
+│   ├── FUNCTION/
+│   │   └── audit.sql
+│   ├── VIEW/
+│   │   └── user_emails.sql
+│   ├── DATA/
+│   │   └── users.sql
+│   └── SEQUENCE_SET/
+│       └── users_id_seq.sql
+└── orca/
+    ├── TABLE/
+    │   └── policy_drafts.sql
+    └── SEQUENCE/
+        └── policy_drafts_draft_id_seq.sql
 ```
 
-**Exit codes:** `0` on success, `99` on invalid arguments.
+What that tree tells you:
+
+- `INDEX/`, `TRIGGER/`, `DEFAULT/` and `FK_CONSTRAINT/` normally disappear, because
+  those child objects are appended into `TABLE/<table>.sql`. It is **not** a
+  guarantee. The merge finds a child's owner either by filename (default,
+  constraint, foreign key) or by the `ON <relation>` clause in the SQL (index,
+  trigger), so an object stays in its own directory when neither can resolve to a
+  table file. Observed survivors with real `pg_dump 17` output: indexes on
+  materialized views, indexes on a partitioned parent (`ON ONLY …`), indexes whose
+  relation needs double-quoting and contains a space, `INSTEAD OF` triggers on
+  views, triggers on foreign tables, and `DEFAULT`/`FK_CONSTRAINT` files for such
+  quoted relations — those files are additionally named after the first word of
+  the relation (`DEFAULT/Weird.sql` for `public."Weird Name"`).
+  `CONSTRAINT/` really is never emitted: primary-key and unique constraints are
+  appended straight into the TABLE file while splitting, before any merge runs.
+- `SEQUENCE/` survives for `IDENTITY` columns, for sequences with non-standard
+  options (`CYCLE`, an explicit `MINVALUE` or `MAXVALUE`), for sequences owned by a
+  column that is not a plain `integer`/`bigint NOT NULL` (including `smallint` —
+  `smallserial` is never generated), for sequences whose `OWNED BY` relation needs
+  double-quoting, and whenever the `nextval` default cannot be removed from every
+  file that holds it. A plain `OWNED BY` sequence on an `integer`/`bigint
+  NOT NULL` column is folded into the column as `bigserial`, its `DEFAULT`
+  assignment is deleted and its sequence file is removed. Only the column named in
+  `OWNED BY` is rewritten — sibling columns such as `user_id` or `external_id` keep
+  their declared type, and a quoted mixed-case column (`"UserId"`) is matched
+  exactly, not case-insensitively.
+- `POLICY/`, `FUNCTION/`, `VIEW/`, `MATERIALIZED VIEW/`, `FOREIGN TABLE/`, `COMMENT/`,
+  `RULE/`, `ROW SECURITY/`, `TABLE ATTACH/`, `INDEX ATTACH/`, `DATA/`, `EXTENSION/`
+  and `SCHEMAS/` keep their own files; `POLICY/` files are named after the table
+  they protect (`users.sql`), not after the policy.
+- `DATA/` and `SEQUENCE_SET/` only appear when the dump carries rows or sequence
+  values, i.e. when the dump was taken with data rather than `--schema-only`.
+
+**Exit codes:** `0` on success, `3` if the dump could not be read or the merged tree
+could not be written (the merge pass is on `split`'s critical path), `99` on invalid arguments.
 
 **Example:**
 
@@ -186,25 +253,37 @@ schemachecker orphaned ./schema/index.sql
 
 ### `dump`
 
-Provisions a PostgreSQL database via testcontainers, runs Atlas migrations from a directory, and produces a pg_dump SQL file.
+Provisions a PostgreSQL database via testcontainers, runs Atlas migrations from a directory, and produces a pg_dump SQL file — or a split per-object directory with `--split`.
 
 ```
-schemachecker dump [migrations] [outputFile]
+schemachecker dump [migrations] [outputPath] [--split]
 ```
 
 | Parameter | Description |
 |-----------|-------------|
 | `migrations` | Path to the directory containing migration SQL files. |
-| `outputFile` | Path where the pg_dump output is written. |
+| `outputPath` | Path where the pg_dump output is written. Without `--split` this is a single SQL file whose parent directory must already exist; with `--split` it is a directory that is cleaned first, so dangerous paths are refused. |
+| `--split` | Optional. Splits the dump into per-object files under `outputPath`. |
+
+With `--split`, the directory produced has exactly the merged shape described in the
+[`split` section](#split): table-owned `INDEX`, `TRIGGER`, `DEFAULT` and
+`FK_CONSTRAINT` SQL is inlined into `<schema>/TABLE/<table>.sql`, `POLICY`, `VIEW`,
+`FUNCTION`, `SEQUENCE` (for `IDENTITY` and non-standard sequences), `EXTENSION` and
+`SCHEMAS` keep their own files, and `index.txt` is pruned to match. `DUMP_DATA`
+controls whether the dump carries rows, and therefore whether `DATA/` and
+`SEQUENCE_SET/` appear.
 
 The pg_dump is run with `--no-privileges` and `--no-owner`, and excludes `flyway_schema_history` and `atlas_schema_revisions` tables.
 
-**Exit codes:** `0` on success, `99` on invalid arguments.
+**Exit codes:** `0` on success, `3` on provisioning, pg_dump or split/merge I/O failure, `99` on invalid arguments.
 
 **Example:**
 
 ```sh
 schemachecker dump ./migrations ./build/schema.sql
+
+# same dump, as a merged per-object tree instead of one file
+schemachecker dump ./migrations ./build/split-output --split
 ```
 
 ---

@@ -69,7 +69,7 @@ func RunDiff(args []string) error {
 	// 3. Split incremental dump
 	fmt.Printf("[3/6] Splitting incremental dump\n")
 	incrementalSplit := filepath.Join(outputDir, "incrementalsplit")
-	if err := split.Dump(incrementalDump, incrementalSplit, split.Options{}); err != nil {
+	if err := split.Dump(incrementalDump, incrementalSplit); err != nil {
 		return checkererror.Wrap(checkererror.ExitInfra, err, "split incremental dump: %s", err)
 	}
 
@@ -84,7 +84,7 @@ func RunDiff(args []string) error {
 	// 5. Split baseline dump
 	fmt.Printf("[5/6] Splitting baseline dump\n")
 	baselineSplit := filepath.Join(outputDir, "baselinesplit")
-	if err := split.Dump(baselineDump, baselineSplit, split.Options{}); err != nil {
+	if err := split.Dump(baselineDump, baselineSplit); err != nil {
 		return checkererror.Wrap(checkererror.ExitInfra, err, "split baseline dump: %s", err)
 	}
 
