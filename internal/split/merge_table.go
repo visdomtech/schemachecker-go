@@ -233,24 +233,6 @@ func tableForContent(content, schemaName string, tableNames map[string]bool) (st
 	return "", false
 }
 
-// appendIfExists reads src and appends it to dst if src exists.
-// Removes src after a successful append.
-func appendIfExists(dstPath, srcPath string) error {
-	data, err := os.ReadFile(srcPath)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read %s: %w", srcPath, err)
-	}
-	if len(strings.TrimSpace(string(data))) == 0 {
-		return os.Remove(srcPath)
-	}
-	if err := appendContent(dstPath, data); err != nil {
-		return err
-	}
-	return os.Remove(srcPath)
-}
 
 // appendContent appends content to dstPath with a blank-line separator.
 func appendContent(dstPath string, content []byte) error {
@@ -816,6 +798,8 @@ func reorderSequenceBeforeTable(destDir string, entries []string) []string {
 		}
 		data, err := os.ReadFile(filepath.Join(destDir, entry))
 		if err != nil {
+			slog.Warn("N1 reorder: could not read TABLE file for nextval scan",
+				"entry", entry, "error", err)
 			continue
 		}
 		for _, match := range reNextvalRef.FindAllStringSubmatch(string(data), -1) {
@@ -851,6 +835,10 @@ func reorderSequenceBeforeTable(destDir string, entries []string) []string {
 	if len(moves) == 0 {
 		return entries
 	}
+
+	slog.Debug("N1 sequence reorder",
+		"sequences_found", len(seqEntries),
+		"sequences_moved", len(moves))
 
 	// Sort moves by targetIdx, then by original seqIdx (stable).
 	sort.Slice(moves, func(i, j int) bool {

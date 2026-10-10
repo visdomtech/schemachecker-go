@@ -128,50 +128,6 @@ func buildGoldenFixture(t *testing.T) (destDir string, before map[string]string)
 	return destDir, before
 }
 
-// readAllFiles reads every file under destDir (recursively) and returns a map
-// of relative path → content. Empty directories are skipped.
-func readAllFiles(t *testing.T, destDir string) map[string]string {
-	t.Helper()
-	result := make(map[string]string)
-	entries, err := os.ReadDir(destDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			readAllFilesRecursive(t, destDir, entry.Name(), result)
-		} else {
-			data, err := os.ReadFile(filepath.Join(destDir, entry.Name()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			result[entry.Name()] = string(data)
-		}
-	}
-	return result
-}
-
-func readAllFilesRecursive(t *testing.T, root, rel string, out map[string]string) {
-	t.Helper()
-	path := filepath.Join(root, rel)
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		relPath := filepath.Join(rel, entry.Name())
-		if entry.IsDir() {
-			readAllFilesRecursive(t, root, relPath, out)
-		} else {
-			data, err := os.ReadFile(filepath.Join(root, relPath))
-			if err != nil {
-				t.Fatal(err)
-			}
-			out[relPath] = string(data)
-		}
-	}
-}
-
 // TestMergeTableObjectsGolden verifies MergeTableObjects output against a
 // known-good fixture. Any change in TABLE file bytes, surviving file set,
 // or index.txt content (except N1 reordering) is a regression.
@@ -410,14 +366,13 @@ func BenchmarkMergeTableObjects(b *testing.B) {
 	schemaDir := filepath.Join(destDir, "public")
 
 	// Create directories
-	for _, d := range []string{"TABLE", "INDEX", "TRIGGER", "DEFAULT", "FK_CONSTRAINT", "CONSTRAINT"} {
+	for _, d := range []string{"TABLE", "INDEX", "TRIGGER", "DEFAULT", "FK_CONSTRAINT", "CONSTRAINT", "SEQUENCE"} {
 		if err := os.MkdirAll(filepath.Join(schemaDir, d), 0o755); err != nil {
 			b.Fatal(err)
 		}
 	}
 
 	const numTables = 300
-	const childrenPerTable = 3 // INDEX + TRIGGER + DEFAULT
 
 	var indexEntries []string
 
@@ -470,6 +425,14 @@ func BenchmarkMergeTableObjects(b *testing.B) {
 			b.Fatal(err)
 		}
 		indexEntries = append(indexEntries, "public/CONSTRAINT/"+tableName+".sql")
+
+		// SEQUENCE file (non-inlineable CYCLE to exercise N1 reorder)
+		seqContent := fmt.Sprintf("CREATE SEQUENCE public.%s_id_seq START WITH 0 INCREMENT BY 1 MINVALUE 0 MAXVALUE 999999 CACHE 1 CYCLE;\n", tableName)
+		seqPath := filepath.Join(schemaDir, "SEQUENCE", tableName+"_id_seq.sql")
+		if err := os.WriteFile(seqPath, []byte(seqContent), 0o644); err != nil {
+			b.Fatal(err)
+		}
+		indexEntries = append(indexEntries, "public/SEQUENCE/"+tableName+"_id_seq.sql")
 	}
 
 	// Write index.txt
@@ -497,6 +460,8 @@ func BenchmarkMergeTableObjects(b *testing.B) {
 			os.WriteFile(filepath.Join(schemaDir, "FK_CONSTRAINT", tableName+".sql"), []byte(fkContent), 0o644)
 			cstContent := fmt.Sprintf("ALTER TABLE public.%s ADD CONSTRAINT %s_chk CHECK (id > 0);\n", tableName, tableName)
 			os.WriteFile(filepath.Join(schemaDir, "CONSTRAINT", tableName+".sql"), []byte(cstContent), 0o644)
+			seqContent := fmt.Sprintf("CREATE SEQUENCE public.%s_id_seq START WITH 0 INCREMENT BY 1 MINVALUE 0 MAXVALUE 999999 CACHE 1 CYCLE;\n", tableName)
+			os.WriteFile(filepath.Join(schemaDir, "SEQUENCE", tableName+"_id_seq.sql"), []byte(seqContent), 0o644)
 		}
 		b.StartTimer()
 		if err := MergeTableObjects(destDir); err != nil {
