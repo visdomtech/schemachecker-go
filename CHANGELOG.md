@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0](https://github.com/visdomtech/schemachecker-go/compare/v1.0.1...v1.1.0) (2026-10-10)
+
+
+### Features
+
+* **split:** always merge table-owned objects into TABLE files ([#9](https://github.com/visdomtech/schemachecker-go/issues/9)) ([bc350ad](https://github.com/visdomtech/schemachecker-go/commit/bc350addd4448982d41b56d726ab4c6ebbbe3ade))
+
+
+### Performance Improvements
+
+* **split:** single-pass MergeTableObjects + N1 sequence ordering ([#11](https://github.com/visdomtech/schemachecker-go/issues/11)) ([f12e517](https://github.com/visdomtech/schemachecker-go/commit/f12e51799b6d0774ae00ce70e78293b8251c4f0c))
+
 ## [1.0.1](https://github.com/visdomtech/schemachecker-go/compare/v1.0.0...v1.0.1) (2026-09-16)
 
 
