@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -87,13 +88,92 @@ func MergeTableObjects(destDir string) error {
 	return errors.Join(errs...)
 }
 
+// childFile holds a child object file's path and content during classification.
+type childFile struct {
+	path    string
+	content []byte
+}
+
 // mergeSchemaTables merges table-associated objects for all tables in one schema.
+// It classifies child files in a single pass per directory, avoiding the
+// O(tables × child-files) re-scan of the original per-table loop.
 func mergeSchemaTables(destDir, schemaName, tableDir string) error {
 	tableEntries, err := os.ReadDir(tableDir)
 	if err != nil {
 		return fmt.Errorf("read TABLE dir: %w", err)
 	}
 
+	// Build a set of known table names for content-based classification.
+	tableNames := make(map[string]bool)
+	for _, entry := range tableEntries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		tableName := strings.TrimSuffix(entry.Name(), ".sql")
+		tableNames[tableName] = true
+	}
+
+	// --- Single classification pass for filename-based types (DEFAULT, CONSTRAINT, FK_CONSTRAINT) ---
+	type tableFiles map[string][]childFile // tableName → files
+	mergeableMaps := make(map[string]tableFiles)
+	for _, objType := range mergeableTypes {
+		mergeableMaps[objType] = make(tableFiles)
+		objDir := filepath.Join(destDir, schemaName, objType)
+		entries, err := os.ReadDir(objDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("read %s dir: %w", objType, err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+				continue
+			}
+			tableName := strings.TrimSuffix(entry.Name(), ".sql")
+			objPath := filepath.Join(objDir, entry.Name())
+			data, err := os.ReadFile(objPath)
+			if err != nil {
+				return fmt.Errorf("read %s: %w", objPath, err)
+			}
+			if len(strings.TrimSpace(string(data))) == 0 {
+				_ = os.Remove(objPath)
+				continue
+			}
+			mergeableMaps[objType][tableName] = append(mergeableMaps[objType][tableName], childFile{path: objPath, content: data})
+		}
+	}
+
+	// --- Single classification pass for content-based types (INDEX, TRIGGER) ---
+	contentMaps := make(map[string]tableFiles)
+	for _, objType := range contentMergeTypes {
+		contentMaps[objType] = make(tableFiles)
+		objDir := filepath.Join(destDir, schemaName, objType)
+		entries, err := os.ReadDir(objDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("read %s dir: %w", objType, err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+				continue
+			}
+			objPath := filepath.Join(objDir, entry.Name())
+			data, err := os.ReadFile(objPath)
+			if err != nil {
+				return fmt.Errorf("read %s: %w", objPath, err)
+			}
+			tableName, ok := tableForContent(string(data), schemaName, tableNames)
+			if !ok {
+				continue
+			}
+			contentMaps[objType][tableName] = append(contentMaps[objType][tableName], childFile{path: objPath, content: data})
+		}
+	}
+
+	// --- Per-table append: look up classified files and append in order ---
 	for _, tableEntry := range tableEntries {
 		if tableEntry.IsDir() || !strings.HasSuffix(tableEntry.Name(), ".sql") {
 			continue
@@ -101,70 +181,56 @@ func mergeSchemaTables(destDir, schemaName, tableDir string) error {
 		tableName := strings.TrimSuffix(tableEntry.Name(), ".sql")
 		tablePath := filepath.Join(tableDir, tableEntry.Name())
 
+		// Filename-based types in order: DEFAULT, CONSTRAINT, FK_CONSTRAINT
 		for _, objType := range mergeableTypes {
-			objFile := filepath.Join(destDir, schemaName, objType, tableName+".sql")
-			if err := appendIfExists(tablePath, objFile); err != nil {
-				return fmt.Errorf("merge %s for %s.%s: %w", objType, schemaName, tableName, err)
+			for _, cf := range mergeableMaps[objType][tableName] {
+				if err := appendContent(tablePath, cf.content); err != nil {
+					return fmt.Errorf("merge %s for %s.%s: %w", objType, schemaName, tableName, err)
+				}
+				if err := os.Remove(cf.path); err != nil {
+					return fmt.Errorf("remove merged file: %w", err)
+				}
 			}
 		}
 
-		// INDEX and TRIGGER files may be named after the object (index name,
-		// trigger name) rather than the table. Scan their content to find
-		// which table they belong to.
+		// Content-based types in order: INDEX, TRIGGER
 		for _, objType := range contentMergeTypes {
-			objDir := filepath.Join(destDir, schemaName, objType)
-			if err := mergeByContent(tablePath, objDir, schemaName, tableName); err != nil {
-				return err
+			for _, cf := range contentMaps[objType][tableName] {
+				if err := appendContent(tablePath, cf.content); err != nil {
+					return fmt.Errorf("merge %s for %s.%s: %w", objType, schemaName, tableName, err)
+				}
+				if err := os.Remove(cf.path); err != nil {
+					return fmt.Errorf("remove merged file: %w", err)
+				}
 			}
 		}
 	}
+
 	return nil
 }
 
 // reOnTable matches ON [schema.]table in CREATE INDEX and CREATE TRIGGER statements.
 var reOnTable = regexp.MustCompile(`(?i)ON\s+([\w.]+)\s*[\s(;,]`)
 
-// mergeByContent scans the object directory for SQL files whose content
-// references the given table (via an ON clause), appends them to the table
-// file, and removes them.
-func mergeByContent(tablePath, objDir, schemaName, tableName string) error {
-	entries, err := os.ReadDir(objDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read %s: %w", objDir, err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
-			continue
-		}
-		objPath := filepath.Join(objDir, entry.Name())
-		data, err := os.ReadFile(objPath)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", objPath, err)
-		}
-		if referencesTable(string(data), schemaName, tableName) {
-			if err := appendContent(tablePath, data); err != nil {
-				return err
-			}
-			if err := os.Remove(objPath); err != nil {
-				return fmt.Errorf("remove merged file: %w", err)
-			}
-		}
-	}
-	return nil
-}
-
-// referencesTable returns true if the SQL content references the given table
-// via an ON clause (CREATE INDEX ... ON table, CREATE TRIGGER ... ON table).
-func referencesTable(content, schemaName, tableName string) bool {
+// tableForContent extracts the referenced table name from SQL content using the
+// first ON clause. It returns the table name and true if the reference matches
+// a known table in the given schema.
+func tableForContent(content, schemaName string, tableNames map[string]bool) (string, bool) {
 	match := reOnTable.FindStringSubmatch(content)
 	if match == nil {
-		return false
+		return "", false
 	}
 	ref := match[1]
-	return ref == tableName || ref == schemaName+"."+tableName
+	if tableNames[ref] {
+		return ref, true
+	}
+	if strings.Contains(ref, ".") {
+		parts := strings.SplitN(ref, ".", 2)
+		if parts[0] == schemaName && tableNames[parts[1]] {
+			return parts[1], true
+		}
+	}
+	return "", false
 }
 
 // appendIfExists reads src and appends it to dst if src exists.
@@ -684,8 +750,12 @@ func readLines(path string) ([]string, error) {
 	return lines, nil
 }
 
+// reNextvalRef matches nextval('...') to extract the sequence reference name.
+var reNextvalRef = regexp.MustCompile(`nextval\('([^']+)'`)
+
 // updateIndexAfterMerge rewrites index.txt to remove entries that no longer
-// exist on disk (merged files) and keeps the rest in their original order.
+// exist on disk (merged files), then reorders referenced SEQUENCE entries to
+// appear before their referencing TABLE entries (N1 fix).
 func updateIndexAfterMerge(destDir string) error {
 	indexPath := filepath.Join(destDir, "index.txt")
 	lines, err := readLines(indexPath)
@@ -704,6 +774,9 @@ func updateIndexAfterMerge(destDir string) error {
 		}
 	}
 
+	// N1: reorder so referenced SEQUENCE entries precede their TABLEs.
+	kept = reorderSequenceBeforeTable(destDir, kept)
+
 	// Rewrite index.txt with surviving entries.
 	out, err := os.Create(indexPath)
 	if err != nil {
@@ -716,4 +789,98 @@ func updateIndexAfterMerge(destDir string) error {
 		}
 	}
 	return out.Close()
+}
+
+// reorderSequenceBeforeTable hoists SEQUENCE entries in front of the earliest
+// TABLE that references them via nextval('...'). Unreferenced sequences keep
+// their original positions. The reorder is stable: relative order of all other
+// entries is preserved.
+func reorderSequenceBeforeTable(destDir string, entries []string) []string {
+	// Map sequence name (filename stem) → original index.
+	seqEntries := make(map[string]int)
+	for i, entry := range entries {
+		if strings.Contains(entry, "/SEQUENCE/") {
+			name := strings.TrimSuffix(filepath.Base(entry), ".sql")
+			seqEntries[name] = i
+		}
+	}
+	if len(seqEntries) == 0 {
+		return entries
+	}
+	// For each TABLE, find referenced sequences via nextval('...').
+	// seqName → earliest table index that references it.
+	seqToEarliestTable := make(map[string]int)
+	for i, entry := range entries {
+		if !strings.Contains(entry, "/TABLE/") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(destDir, entry))
+		if err != nil {
+			continue
+		}
+		for _, match := range reNextvalRef.FindAllStringSubmatch(string(data), -1) {
+			seqRef := match[1]
+			seqName := stripQuotes(seqRef)
+			if strings.Contains(seqName, ".") {
+				parts := strings.Split(seqName, ".")
+				seqName = parts[len(parts)-1]
+			}
+			if _, ok := seqEntries[seqName]; !ok {
+				continue
+			}
+			if current, ok := seqToEarliestTable[seqName]; !ok || i < current {
+				seqToEarliestTable[seqName] = i
+			}
+		}
+	}
+
+	type move struct {
+		seqName   string
+		seqIdx    int
+		targetIdx int
+	}
+	var moves []move
+	for seqName, seqIdx := range seqEntries {
+		tableIdx, ok := seqToEarliestTable[seqName]
+		if !ok || seqIdx <= tableIdx {
+			continue
+		}
+		moves = append(moves, move{seqName: seqName, seqIdx: seqIdx, targetIdx: tableIdx})
+	}
+
+	if len(moves) == 0 {
+		return entries
+	}
+
+	// Sort moves by targetIdx, then by original seqIdx (stable).
+	sort.Slice(moves, func(i, j int) bool {
+		if moves[i].targetIdx != moves[j].targetIdx {
+			return moves[i].targetIdx < moves[j].targetIdx
+		}
+		return moves[i].seqIdx < moves[j].seqIdx
+	})
+
+	// Build insertion map: targetIdx → []seqIdx
+	insertions := make(map[int][]int)
+	seqMoved := make(map[int]bool)
+	for _, m := range moves {
+		insertions[m.targetIdx] = append(insertions[m.targetIdx], m.seqIdx)
+		seqMoved[m.seqIdx] = true
+	}
+
+	// Build the reordered list.
+	var result []string
+	for i, entry := range entries {
+		// Insert sequences that should appear before this entry.
+		for _, seqIdx := range insertions[i] {
+			result = append(result, entries[seqIdx])
+		}
+		// Skip sequences at their original positions if they've been moved.
+		if seqMoved[i] {
+			continue
+		}
+		result = append(result, entry)
+	}
+
+	return result
 }
