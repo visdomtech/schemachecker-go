@@ -114,6 +114,18 @@ in-repo consumer `merge.FromIndex` is unaffected: it splits each file into
 statement blocks and defers every FK block to a second pass, which is what `check`
 and the `merge` subcommand use.
 
+A second, known case: when a sequence is **not** folded into `bigserial`, merging
+moves its `ALTER TABLE … ALTER COLUMN … SET DEFAULT nextval(…)` from `DEFAULT/` into
+the owning `TABLE/<table>.sql`, which appears **earlier** in `index.txt` than the
+`SEQUENCE/` file it refers to. Sequential replay then fails with
+`ERROR: relation "<schema>_<table>_seq" does not exist` and the column silently
+loses its default. This affects `IDENTITY`-adjacent and non-standard
+(`CYCLE`/`MINVALUE`/`MAXVALUE`) sequences, is a pre-existing defect unrelated to
+the bigserial matching fix, and is **not** fixed in this release — see
+`docs/as-goals/split-merge-by-default/1/review.md` §7 row 3 and
+`docs/as-goals/split-merge-by-default/2/plan.md` §1.5. Use `schemachecker merge`
+rather than `psql -f` over `index.txt`.
+
 The output directory structure mirrors PostgreSQL object types. The listing below
 is from an actual run over a dump containing tables, sequences, indexes, triggers,
 constraints, policies, a function, a view and table data — regenerate it for
@@ -150,17 +162,34 @@ outputDir/
 
 What that tree tells you:
 
-- There are **no** `INDEX/`, `TRIGGER/`, `DEFAULT/` or `FK_CONSTRAINT/`
-  directories — that SQL is inside `TABLE/<table>.sql`. `CONSTRAINT/` is never
-  emitted either: primary-key and unique constraints are appended straight into the
-  TABLE file while splitting, before any merge runs.
-- `SEQUENCE/` survives for `IDENTITY` columns and for sequences with non-standard
-  options. A plain `OWNED BY` sequence on an integer/bigint column is folded into
-  the column as `bigserial` and its sequence file is removed, which is why `public`
-  above has no `SEQUENCE/` directory while `orca` does.
-- `POLICY/`, `FUNCTION/`, `VIEW/`, `DATA/`, `EXTENSION/` and `SCHEMAS/` keep their
-  own files; `POLICY/` files are named after the table they protect (`users.sql`),
-  not after the policy.
+- `INDEX/`, `TRIGGER/`, `DEFAULT/` and `FK_CONSTRAINT/` normally disappear, because
+  those child objects are appended into `TABLE/<table>.sql`. It is **not** a
+  guarantee. The merge finds a child's owner either by filename (default,
+  constraint, foreign key) or by the `ON <relation>` clause in the SQL (index,
+  trigger), so an object stays in its own directory when neither can resolve to a
+  table file. Observed survivors with real `pg_dump 17` output: indexes on
+  materialized views, indexes on a partitioned parent (`ON ONLY …`), indexes whose
+  relation needs double-quoting and contains a space, `INSTEAD OF` triggers on
+  views, triggers on foreign tables, and `DEFAULT`/`FK_CONSTRAINT` files for such
+  quoted relations — those files are additionally named after the first word of
+  the relation (`DEFAULT/Weird.sql` for `public."Weird Name"`).
+  `CONSTRAINT/` really is never emitted: primary-key and unique constraints are
+  appended straight into the TABLE file while splitting, before any merge runs.
+- `SEQUENCE/` survives for `IDENTITY` columns, for sequences with non-standard
+  options (`CYCLE`, an explicit `MINVALUE` or `MAXVALUE`), for sequences owned by a
+  column that is not a plain `integer`/`bigint NOT NULL` (including `smallint` —
+  `smallserial` is never generated), for sequences whose `OWNED BY` relation needs
+  double-quoting, and whenever the `nextval` default cannot be removed from every
+  file that holds it. A plain `OWNED BY` sequence on an `integer`/`bigint
+  NOT NULL` column is folded into the column as `bigserial`, its `DEFAULT`
+  assignment is deleted and its sequence file is removed. Only the column named in
+  `OWNED BY` is rewritten — sibling columns such as `user_id` or `external_id` keep
+  their declared type, and a quoted mixed-case column (`"UserId"`) is matched
+  exactly, not case-insensitively.
+- `POLICY/`, `FUNCTION/`, `VIEW/`, `MATERIALIZED VIEW/`, `FOREIGN TABLE/`, `COMMENT/`,
+  `RULE/`, `ROW SECURITY/`, `TABLE ATTACH/`, `INDEX ATTACH/`, `DATA/`, `EXTENSION/`
+  and `SCHEMAS/` keep their own files; `POLICY/` files are named after the table
+  they protect (`users.sql`), not after the policy.
 - `DATA/` and `SEQUENCE_SET/` only appear when the dump carries rows or sequence
   values, i.e. when the dump was taken with data rather than `--schema-only`.
 

@@ -3,8 +3,10 @@
 //
 // Splitting always ends in an unconditional merge pass (MergeTableObjects):
 // table-owned INDEX, TRIGGER, DEFAULT and FK_CONSTRAINT SQL is inlined into the
-// owning <schema>/TABLE/<table>.sql and the per-type child files are removed.
-// The merged tree is therefore the only output shape this package produces.
+// owning <schema>/TABLE/<table>.sql and the per-type child files are removed,
+// except for children whose owning table cannot be resolved from the file name
+// or the ON clause. The merged tree is therefore the only output shape this
+// package produces.
 package split
 
 import (
@@ -42,7 +44,8 @@ const (
 
 // Dump splits the pg_dump file at dumpFile into per-object SQL files under destDir,
 // then unconditionally inlines table-owned INDEX, TRIGGER, DEFAULT and FK_CONSTRAINT
-// SQL into the corresponding TABLE file (see MergeTableObjects).
+// SQL into the corresponding TABLE file (see MergeTableObjects), except for children
+// whose owning table cannot be resolved from the file name or the ON clause.
 //
 // destDir must be empty or non-existent: the merge appends to TABLE files and is not
 // idempotent. Callers own cleaning it (see cmd.cleanOutputDir).
