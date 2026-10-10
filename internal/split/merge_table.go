@@ -62,7 +62,7 @@ func MergeTableObjects(destDir string) error {
 		schemaCount++
 
 		// Inline standard table-owned sequences as BIGSERIAL before other merges.
-		// This must run before mergeSchemaTables so that removeDefaultNextval
+		// This must run before mergeSchemaTables so that stripDefaultNextval
 		// cleans DEFAULT files before they are appended to TABLE files.
 		if err := inlineSequences(destDir, schemaName); err != nil {
 			slog.Error("failed to inline sequences", "schema", schemaName, "error", err)
@@ -217,7 +217,7 @@ const reQualifiedIdent = `(?:[\w$]+|"(?:[^"]|"")*")(?:\.(?:[\w$]+|"(?:[^"]|"")*"
 // reAlterTableTarget matches the leading ALTER TABLE and captures the target relation.
 // Uses a simple non-greedy match up to the first whitespace — sufficient for
 // extracting the relation name from pg_dump-emitted DEFAULT files.
-var reAlterTableTarget = regexp.MustCompile(`(?im)^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?(\S+)`)
+var reAlterTableTarget = regexp.MustCompile(`(?im)^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?(` + reQualifiedIdent + `)`)
 
 // inlineSequences scans SEQUENCE/ for table-owned standard sequences, converts
 // the owning table's column to BIGSERIAL, removes the nextval DEFAULT, and
@@ -286,8 +286,11 @@ func inlineSequences(destDir, schemaName string) error {
 			continue
 		}
 
+		// Compile the nextval regex once per sequence and reuse for strip + guard.
+		reNextval := reSetDefaultColumn(columnName)
+
 		// Strip the nextval default from the TABLE content.
-		newTable = stripDefaultNextval(newTable, columnName)
+		newTable = reNextval.ReplaceAllLiteralString(newTable, "")
 
 		// Strip the nextval default from the DEFAULT file (if present).
 		defaultPath := filepath.Join(destDir, schemaName, "DEFAULT", tableName+".sql")
@@ -295,7 +298,7 @@ func inlineSequences(destDir, schemaName string) error {
 		defaultChanged := false
 		defaultIsEmpty := false
 		if defData, err := os.ReadFile(defaultPath); err == nil {
-			newDefault = stripDefaultNextval(string(defData), columnName)
+			newDefault = reNextval.ReplaceAllLiteralString(string(defData), "")
 			defaultChanged = newDefault != string(defData)
 			defaultIsEmpty = len(strings.TrimSpace(newDefault)) == 0
 			// Update cache so the guard sees the stripped content.
@@ -314,8 +317,7 @@ func inlineSequences(destDir, schemaName string) error {
 
 		// Stranding guard: check that no nextval default for this column
 		// survives in any file we cannot rewrite.
-		reLeftover := reSetDefaultColumn(columnName)
-		if reLeftover.MatchString(newTable) {
+		if reNextval.MatchString(newTable) {
 			slog.Warn("skipping sequence: a nextval default for the column could not be removed",
 				"schema", schemaName, "table", tableName, "column", columnName,
 				"sequence", entry.Name(), "location", "table_file")
@@ -325,7 +327,7 @@ func inlineSequences(destDir, schemaName string) error {
 		// (the cache entry for the table's own DEFAULT file was already updated above).
 		stranded := false
 		for _, defFile := range defaultCache[strings.ToLower(tableName)] {
-			if reLeftover.MatchString(defFile.content) {
+			if reNextval.MatchString(defFile.content) {
 				slog.Warn("skipping sequence: a nextval default for the column could not be removed",
 					"schema", schemaName, "table", tableName, "column", columnName,
 					"sequence", entry.Name(), "location", defFile.path)
@@ -385,6 +387,10 @@ func scanDefaultDir(destDir, schemaName string) map[string][]defaultFileEntry {
 	defaultDir := filepath.Join(destDir, schemaName, "DEFAULT")
 	entries, err := os.ReadDir(defaultDir)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("could not scan DEFAULT directory for stranding guard",
+				"schema", schemaName, "error", err)
+		}
 		return nil
 	}
 	result := make(map[string][]defaultFileEntry)
@@ -395,13 +401,17 @@ func scanDefaultDir(destDir, schemaName string) map[string][]defaultFileEntry {
 		path := filepath.Join(defaultDir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
+			slog.Warn("could not read DEFAULT file for stranding guard",
+				"schema", schemaName, "file", entry.Name(), "error", err)
 			continue
 		}
 		content := string(data)
 		if m := reAlterTableTarget.FindStringSubmatch(content); m != nil {
 			rel := m[1]
-			// Use the last dot-separated part as the table name.
-			parts := strings.Split(rel, ".")
+			// Use the last dot-separated part as the table name, stripping
+			// surrounding quotes so the cache key matches the de-quoted
+			// tableName produced by parseSequenceOwnedBy.
+			parts := splitDotRef(rel)
 			table := parts[len(parts)-1]
 			result[strings.ToLower(table)] = append(result[strings.ToLower(table)], defaultFileEntry{path: path, content: content})
 		}
@@ -453,7 +463,7 @@ func readIdentToken(s string) (name string, quoted bool, rest string, ok bool) {
 // identEquals compares two PostgreSQL identifiers with proper folding semantics.
 // The reference name (from OWNED BY) may have been de-quoted by parseSequenceOwnedBy,
 // so we try both quoted and unquoted comparison to handle both cases.
-func identEquals(aName string, aQuoted bool, bName string, bQuoted bool) bool {
+func identEquals(aName string, _ bool, bName string, _ bool) bool {
 	// Unquoted comparison (case-insensitive) — works when both are unquoted,
 	// or when a quoted reference was de-quoted and the SQL identifier is also unquoted.
 	if strings.EqualFold(aName, bName) {
@@ -467,9 +477,20 @@ func identEquals(aName string, aQuoted bool, bName string, bQuoted bool) bool {
 	return false
 }
 
-// isCreateTableHeader returns true if the trimmed line starts with CREATE TABLE (case-insensitive).
+// isCreateTableHeader returns true if the trimmed line starts with CREATE
+// [UNLOGGED|TEMPORARY|TEMP] TABLE (case-insensitive).
 func isCreateTableHeader(trimmed string) bool {
-	return len(trimmed) >= 12 && strings.EqualFold(trimmed[:12], "CREATE TABLE")
+	if len(trimmed) < 7 || !strings.EqualFold(trimmed[:7], "CREATE ") {
+		return false
+	}
+	rest := strings.TrimLeft(trimmed[7:], " \t")
+	for _, mod := range []string{"UNLOGGED ", "TEMPORARY ", "TEMP "} {
+		if len(rest) >= len(mod) && strings.EqualFold(rest[:len(mod)], mod) {
+			rest = strings.TrimLeft(rest[len(mod):], " \t")
+			break
+		}
+	}
+	return len(rest) >= 5 && strings.EqualFold(rest[:5], "TABLE")
 }
 
 // isNotNullConstraint returns true if the fields represent the NOT NULL constraint.
