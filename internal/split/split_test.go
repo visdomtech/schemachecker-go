@@ -193,7 +193,7 @@ func TestDumpBasic(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir, Options{}); err != nil {
+	if err := Dump(dumpFile, destDir); err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
 
@@ -266,7 +266,7 @@ func TestDumpCopyData(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir, Options{}); err != nil {
+	if err := Dump(dumpFile, destDir); err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
 
@@ -299,7 +299,7 @@ func TestDumpEmptyCopy(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir, Options{}); err != nil {
+	if err := Dump(dumpFile, destDir); err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
 
@@ -330,7 +330,7 @@ func TestDumpSeqSet(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir, Options{}); err != nil {
+	if err := Dump(dumpFile, destDir); err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
 
@@ -358,7 +358,7 @@ func TestDumpFilenameTruncation(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	err := Dump(dumpFile, destDir, Options{})
+	err := Dump(dumpFile, destDir)
 	if err != nil {
 		t.Fatalf("Dump failed: %v", err)
 	}
@@ -527,7 +527,7 @@ func TestMergeTableObjects(t *testing.T) {
 	}
 }
 
-func TestDumpWithMerge(t *testing.T) {
+func TestDumpMergesIndexAndTriggerIntoTableFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	dumpFile := filepath.Join(tmpDir, "dump.sql")
 
@@ -555,8 +555,8 @@ func TestDumpWithMerge(t *testing.T) {
 	}
 
 	destDir := filepath.Join(tmpDir, "output")
-	if err := Dump(dumpFile, destDir, Options{Merge: true}); err != nil {
-		t.Fatalf("Dump with merge failed: %v", err)
+	if err := Dump(dumpFile, destDir); err != nil {
+		t.Fatalf("Dump failed: %v", err)
 	}
 
 	// TABLE/users.sql should contain TABLE + INDEX + TRIGGER
@@ -1133,4 +1133,144 @@ func TestMergeInlineSequenceNegativeMinvalue(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(destDir, "public/SEQUENCE/temps_id_seq.sql")); os.IsNotExist(err) {
 		t.Error("SEQUENCE with negative MINVALUE should be preserved")
 	}
+}
+
+func TestDumpMergesChildObjectsByDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	dumpFile := filepath.Join(tmpDir, "dump.sql")
+
+	// Realistic pg_dump headers: child objects use the two-token
+	// "-- Name: <relation> <object>; Type: ...;" form.
+	dumpContent := strings.Join([]string{
+		"SET statement_timeout = 0;",
+		"",
+		"-- Name: users; Type: TABLE; Schema: public; Owner: postgres",
+		"CREATE TABLE public.users (",
+		"    id integer NOT NULL,",
+		"    email text",
+		");",
+		"",
+		"-- Name: orders; Type: TABLE; Schema: public; Owner: postgres",
+		"CREATE TABLE public.orders (",
+		"    id integer NOT NULL,",
+		"    user_id integer",
+		");",
+		"",
+		"-- Name: users_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres",
+		"CREATE SEQUENCE public.users_id_seq",
+		"    START WITH 1",
+		"    INCREMENT BY 1",
+		"    NO MINVALUE",
+		"    NO MAXVALUE",
+		"    CACHE 1;",
+		"",
+		"-- Name: users_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres",
+		"ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;",
+		"",
+		"-- Name: users id; Type: DEFAULT; Schema: public; Owner: postgres",
+		"ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);",
+		"",
+		"-- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres",
+		"ALTER TABLE ONLY public.users ADD CONSTRAINT users_pkey PRIMARY KEY (id);",
+		"",
+		"-- Name: users_email_idx; Type: INDEX; Schema: public; Owner: postgres",
+		"CREATE UNIQUE INDEX users_email_idx ON public.users USING btree (email);",
+		"",
+		"-- Name: orders orders_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres",
+		"ALTER TABLE ONLY public.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;",
+		"",
+		"-- Name: users users_audit; Type: TRIGGER; Schema: public; Owner: postgres",
+		"CREATE TRIGGER users_audit AFTER UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.audit();",
+		"",
+		"-- Name: policy_drafts; Type: TABLE; Schema: orca; Owner: postgres",
+		"CREATE TABLE orca.policy_drafts (",
+		"    draft_id bigint NOT NULL,",
+		"    workspace_id text NOT NULL",
+		");",
+		"",
+		"-- Name: policy_drafts_draft_id_seq; Type: SEQUENCE; Schema: orca; Owner: postgres",
+		"ALTER TABLE orca.policy_drafts ALTER COLUMN draft_id ADD GENERATED ALWAYS AS IDENTITY (",
+		"    SEQUENCE NAME orca.policy_drafts_draft_id_seq",
+		"    START WITH 1",
+		"    NO MINVALUE",
+		"    CACHE 1",
+		");",
+		"",
+	}, "\n")
+
+	if err := os.WriteFile(dumpFile, []byte(dumpContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := filepath.Join(tmpDir, "output")
+	if err := Dump(dumpFile, destDir); err != nil {
+		t.Fatalf("Dump failed: %v", err)
+	}
+
+	users := readFile(t, destDir, "public/TABLE/users.sql")
+	for _, want := range []string{
+		"CREATE TABLE public.users",
+		"ADD CONSTRAINT users_pkey PRIMARY KEY",
+		"CREATE UNIQUE INDEX users_email_idx",
+		"CREATE TRIGGER users_audit",
+	} {
+		if !strings.Contains(users, want) {
+			t.Errorf("public/TABLE/users.sql should contain %q, got:\n%s", want, users)
+		}
+	}
+	if !strings.Contains(users, "bigserial") {
+		t.Errorf("standard OWNED BY sequence should still inline as bigserial, got:\n%s", users)
+	}
+	if strings.Contains(users, "nextval") {
+		t.Errorf("inlined nextval DEFAULT should be gone, got:\n%s", users)
+	}
+
+	orders := readFile(t, destDir, "public/TABLE/orders.sql")
+	if !strings.Contains(orders, "orders_user_id_fkey FOREIGN KEY") {
+		t.Errorf("public/TABLE/orders.sql should contain the inlined FK, got:\n%s", orders)
+	}
+
+	for _, dir := range []string{"public/INDEX", "public/TRIGGER", "public/DEFAULT", "public/FK_CONSTRAINT", "public/CONSTRAINT"} {
+		if _, err := os.Stat(filepath.Join(destDir, dir)); !os.IsNotExist(err) {
+			t.Errorf("%s should not exist in merged output", dir)
+		}
+	}
+
+	// IDENTITY preservation must survive the default merge path (gate 3).
+	pd := readFile(t, destDir, "orca/TABLE/policy_drafts.sql")
+	if strings.Contains(pd, "bigserial") {
+		t.Errorf("IDENTITY column must not become bigserial, got:\n%s", pd)
+	}
+	if !strings.Contains(pd, "bigint NOT NULL") {
+		t.Errorf("IDENTITY column must stay bigint NOT NULL, got:\n%s", pd)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "orca/SEQUENCE/policy_drafts_draft_id_seq.sql")); os.IsNotExist(err) {
+		t.Error("IDENTITY SEQUENCE file must be preserved")
+	}
+
+	// index.txt must be pruned and every remaining entry must exist on disk.
+	idx := readFile(t, destDir, "index.txt")
+	for _, notWant := range []string{"public/INDEX/", "public/TRIGGER/", "public/DEFAULT/", "public/FK_CONSTRAINT/", "public/CONSTRAINT/"} {
+		if strings.Contains(idx, notWant) {
+			t.Errorf("index.txt should not contain %q, got:\n%s", notWant, idx)
+		}
+	}
+	for _, entry := range strings.Split(strings.TrimSuffix(idx, "\n"), "\n") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(destDir, entry)); err != nil {
+			t.Errorf("index.txt entry %q has no file on disk: %v", entry, err)
+		}
+	}
+}
+
+func readFile(t *testing.T, root string, rel ...string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(append([]string{root}, rel...)...))
+	if err != nil {
+		t.Fatalf("read %s: %v", filepath.Join(append([]string{root}, rel...)...), err)
+	}
+	return string(data)
 }

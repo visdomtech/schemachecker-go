@@ -15,8 +15,9 @@ import (
 // Usage: dump [migrations] [outputPath] [--split]
 //
 // Without --split, outputPath is a single SQL file.
-// With --split, outputPath is a directory; the dump is split into
-// per-object files (no merge, preserving raw pg_dump representation).
+// With --split, outputPath is a directory holding the per-object tree, identical
+// in shape to the split subcommand's output: table-owned INDEX, TRIGGER, DEFAULT
+// and FK_CONSTRAINT SQL is inlined into the owning <schema>/TABLE/<table>.sql.
 func RunDump(args []string) error {
 	if len(args) < 3 || len(args) > 4 {
 		return UsageError("Invalid command line arguments.\nUsage dump [migrations] [outputPath] [--split]")
@@ -73,5 +74,5 @@ func dumpAndSplit(ctx context.Context, migrations, outputDir string, schemaOnly 
 
 	fmt.Printf("Splitting into [%s]\n", outputDir)
 
-	return split.Dump(tmpPath, outputDir, split.Options{})
+	return split.Dump(tmpPath, outputDir)
 }

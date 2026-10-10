@@ -1,5 +1,10 @@
 // Package split implements the PGDumpSplitter state machine that parses
 // pg_dump output and splits it into per-object SQL files with an index.txt.
+//
+// Splitting always ends in an unconditional merge pass (MergeTableObjects):
+// table-owned INDEX, TRIGGER, DEFAULT and FK_CONSTRAINT SQL is inlined into the
+// owning <schema>/TABLE/<table>.sql and the per-type child files are removed.
+// The merged tree is therefore the only output shape this package produces.
 package split
 
 import (
@@ -35,15 +40,13 @@ const (
 	stateSeqSet
 )
 
-// Options configures the split behavior.
-type Options struct {
-	// Merge inlines INDEX, TRIGGER, DEFAULT, CONSTRAINT, and FK_CONSTRAINT
-	// SQL into the corresponding TABLE file instead of creating separate files.
-	Merge bool
-}
-
-// Dump splits the pg_dump file at dumpFile into per-object SQL files under destDir.
-func Dump(dumpFile string, destDir string, opts Options) error {
+// Dump splits the pg_dump file at dumpFile into per-object SQL files under destDir,
+// then unconditionally inlines table-owned INDEX, TRIGGER, DEFAULT and FK_CONSTRAINT
+// SQL into the corresponding TABLE file (see MergeTableObjects).
+//
+// destDir must be empty or non-existent: the merge appends to TABLE files and is not
+// idempotent. Callers own cleaning it (see cmd.cleanOutputDir).
+func Dump(dumpFile string, destDir string) error {
 	f, err := os.Open(dumpFile)
 	if err != nil {
 		return fmt.Errorf("open dump file: %w", err)
@@ -74,10 +77,8 @@ func Dump(dumpFile string, destDir string, opts Options) error {
 		return fmt.Errorf("final flush: %w", err)
 	}
 
-	if opts.Merge {
-		if err := MergeTableObjects(destDir); err != nil {
-			return fmt.Errorf("merge post-processing failed (unmerged split still available at %s): %w", destDir, err)
-		}
+	if err := MergeTableObjects(destDir); err != nil {
+		return fmt.Errorf("merge table objects: %w", err)
 	}
 	return nil
 }
