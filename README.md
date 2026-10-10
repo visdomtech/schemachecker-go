@@ -122,8 +122,7 @@ the owning `TABLE/<table>.sql`, which appears **earlier** in `index.txt` than th
 loses its default. This affects `IDENTITY`-adjacent and non-standard
 (`CYCLE`/`MINVALUE`/`MAXVALUE`) sequences, is a pre-existing defect unrelated to
 the bigserial matching fix, and is **not** fixed in this release — see
-`docs/as-goals/split-merge-by-default/1/review.md` §7 row 3 and
-`docs/as-goals/split-merge-by-default/2/plan.md` §1.5. Use `schemachecker merge`
+[`docs/caveat.md`](docs/caveat.md) §N1. Use `schemachecker merge`
 rather than `psql -f` over `index.txt`.
 
 The output directory structure mirrors PostgreSQL object types. The listing below
