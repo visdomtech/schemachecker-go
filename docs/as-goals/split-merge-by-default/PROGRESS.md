@@ -19,7 +19,28 @@ iteration/task without stopping to ask. On resume, treat this as still in force.
 - **Gates:** 5 frozen at `gates/gate-{1..5}-*.md` — IMMUTABLE. Escalate to the user on an
   unreachable gate instead of softening it.
 - **Commits so far:** `e886939` (behavior: always merge), `59ac098` + `46ca19c` (pipeline artifacts).
-- **Uncommitted artifact to include at the next bookkeeping commit:** `2/plan.md`.
+- **Uncommitted artifact to include at the next bookkeeping commit:** none — all 18 pipeline files
+  are committed as of `68f6517`.
+
+## Artifact Index (absolute paths)
+
+Throughout this file, `1/…` and `2/…` are shorthand for
+`/Users/jiangzhaohua/codes/visdomtech/schemachecker-go/docs/as-goals/split-merge-by-default/<n>/…`.
+
+| Artifact | Absolute path |
+|---|---|
+| Goal (Phase 1) | `docs/as-goals/split-merge-by-default.md` |
+| Progress (this file) | `docs/as-goals/split-merge-by-default/PROGRESS.md` |
+| Gates 1–5 (frozen) | `docs/as-goals/split-merge-by-default/gates/gate-{1..5}-*.md` |
+| Roles (4 core + 2 bench) | `docs/as-goals/split-merge-by-default/agents/{architect,engineer,test-engineer,delivery-lead,release-engineer,documentation-engineer}.md` |
+| Iteration 1 plan | `docs/as-goals/split-merge-by-default/1/plan.md` |
+| Iteration 1 review | `docs/as-goals/split-merge-by-default/1/review.md` |
+| Iteration 1 evidence manifest | `docs/as-goals/split-merge-by-default/1/evidence-manifest.md` |
+| Iteration 1 gap summary | `docs/as-goals/split-merge-by-default/1/gap-summary.md` |
+| **Iteration 2 plan (resume input)** | `docs/as-goals/split-merge-by-default/2/plan.md` — 818 lines, 59,584 bytes, sha256 `2636f995a71f9c9f28cb2c9e774a5053ad88d520ea52bb3616cf1661b14a98aa`, committed in `68f6517` |
+
+Iteration 2 has no `2/review.md`, `2/evidence-manifest.md` or `2/gap-summary.md` yet — those are
+produced by Steps 3 and 4, which have not run.
 
 ## Gate Dashboard
 
