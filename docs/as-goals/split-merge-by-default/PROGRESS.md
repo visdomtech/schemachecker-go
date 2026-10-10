@@ -3,14 +3,23 @@
 **Autonomy rule:** When running with skill `as-goal`, always proceed autonomously to the next
 iteration/task without stopping to ask. On resume, treat this as still in force.
 
+> **PAUSED at user request on 2026-10-10** (iteration 2, between Step 1 and Step 2). The user asked
+> to stop and resume later; the autonomy rule below resumes applying the moment work restarts — do
+> not re-ask for approval to continue, and do not re-run completed steps.
+
 - **Goal file:** docs/as-goals/split-merge-by-default.md
 - **Current phase:** 4 (iterating)
-- **Iteration:** 2/10 (Step 1 — Architect planning from iteration-1 gap summary)
-- **Resume point:** `2/plan.md` → Step 2 Engineer fixes C1, then docs, then Step 3 re-review.
-- **Gates:** 5 frozen at `gates/gate-{1..5}-*.md` — IMMUTABLE from here. Escalate to the user on
-  an unreachable gate instead of softening it.
-- **Commits so far:** `e886939` (behavior: always merge), `59ac098` (pipeline artifacts).
-  Working tree clean at the time of the iteration-1 decision.
+- **Iteration:** 2/10 — **Step 1 COMPLETE** (`2/plan.md`), **Step 2 NOT STARTED**
+- **Resume point:** dispatch the **Engineer** for plan tasks **T1+T2** (C1 red tests → fix, shipped
+  as one commit), then the **Documentation Engineer** for **T3**, then the **Test Engineer** for
+  **T4** (re-produce all five gates), then decide at Step 4.
+- **Verified clean at pause:** `git status --porcelain` shows only `?? docs/as-goals/split-merge-by-default/2/`;
+  `git diff` is empty. The interrupted Step 2 dispatch touched **no source file**, so there is no
+  half-applied change to reconcile. Nothing in `internal/split/` or `cmd/` is modified.
+- **Gates:** 5 frozen at `gates/gate-{1..5}-*.md` — IMMUTABLE. Escalate to the user on an
+  unreachable gate instead of softening it.
+- **Commits so far:** `e886939` (behavior: always merge), `59ac098` + `46ca19c` (pipeline artifacts).
+- **Uncommitted artifact to include at the next bookkeeping commit:** `2/plan.md`.
 
 ## Gate Dashboard
 
@@ -53,6 +62,22 @@ the Test Engineer against live PostgreSQL 17 and against a `HEAD~2` binary.
 **Routed To:** Engineer (implementation defect)
 **Priority:** Critical — blocks DONE hygiene.
 
+### N1 — always-merge can strand a `nextval` DEFAULT before its sequence (DEFERRED, needs the user)
+
+**Missing:** for a sequence that is *not* inlined (IDENTITY, `CYCLE`/explicit `MINVALUE`/`MAXVALUE`,
+or a relation the `OWNED BY` parser cannot attribute), `mergeByContent` moves
+`ALTER TABLE … ALTER COLUMN … SET DEFAULT nextval(…)` from `DEFAULT/<table>.sql` into
+`TABLE/<table>.sql`, whose `index.txt` entry precedes the `SEQUENCE/` entry.
+**Root Cause:** index order is creation order, not dependency order. Sequential replay fails with
+`ERROR: relation "public.cycled_id_seq" does not exist` **and the column silently loses its
+default** (measured: `cycled.id` → no default). `internal/merge` defers only FK blocks, so `check`
+and `merge` inherit the hazard. Pre-existing at HEAD and independent of C1 — dormant for the same
+reason C1 was, because nothing merged.
+**Routed To:** user decision at DONE — (i) accept the documented caveat, (ii) open a follow-up goal
+for dependency-aware index ordering / `FromIndex` deferral, (iii) re-scope this goal.
+**Iteration-2 action:** document it only (T3). **Priority:** Critical-adjacent, deliberately
+non-blocking for this goal's gates.
+
 ### Deferred (user decision, deliberately out of iteration 2)
 **W2 —** merge post-pass is O(tables × index/trigger files) (`merge_table.go:119-146`), measured
 16× slower at 300 tables × 900 indexes (4.48 s vs 0.28 s) and minutes at 1000 × 5000. Fixing it is
@@ -61,17 +86,57 @@ a refactor of `MergeTableObjects`, which the goal excludes. Not a gate failure, 
 **S2 —** README.md:105's dangerous-path refusal is bypassable under a symlinked cwd (pre-existing,
 unrelated to merge).
 
+## Iteration 2 Step 1 — Architect outcome (complete)
+
+`2/plan.md` (5 tasks: T1 red tests, T2 fix, T3 docs, T4 re-gate, T5 record-correction commit).
+It corrected the iteration-1 premise twice and found a **second** defect:
+
+- **The C1 fix is not a regex patch.** `inlineBigserial` and `removeDefaultNextval` are one atomic
+  pair: fixing only the first converts `user_id` to `bigserial` while leaving its `nextval` DEFAULT
+  intact — an outright invalid column definition. Plan §A.2–A.4 specifies parsing the column list,
+  full-token quoted/unquoted identifier matching, replacing only the matched occurrence, plus a
+  stranding guard so a sequence is never deleted while a `nextval` default still references it.
+- **Sibling sweep (13 sites, §A.5):** 6 vulnerable sites, all on the now-default merge path. 2 are
+  fixed in iteration 2 (the atomic pair); 4 are **deferred with documented reasons** — fixing
+  `reOwnedBy`/`reNameSplit`/`reOnTable`/`reSeqSet` would *expand* conversion and multiply N1.
+- **6 new regression tests (§A.6), all red at HEAD**, including the `foo(id, external_id, user_id,
+  width)` shape, a quoted-identifier case, last-column ownership, the stranding guard, and a
+  column literally named `bigint`. No existing test may be modified.
+- **Performance question answered (§1.6):** the fix does not worsen the O(tables × index-files)
+  merge cost (paired medians within run-to-run spread), so W2 needs no escalation.
+- **Empirical merge/survive table (§B.1)** replaces the docs' guessed claims — this is what T3 must
+  write from, not plausibility.
+
+## Escalation decisions (Delivery Lead, iteration 2 Step 1)
+
+- **G1 — W2: accepted, no action.** Measured; the fix does not make it materially worse. W2, S1, S2
+  stay deferred.
+- **G2 — N1: DEFERRED to the user, documented in iteration 2 only.** Like C1, N1 is dormant at HEAD
+  only because nothing merged; our change makes it reachable too. But every remedy touches
+  `index.txt` ordering or `internal/merge.FromIndex`, both excluded by the user-confirmed Out of
+  Scope list — fixing it here would be mid-pipeline scope creep. **This must be presented to the
+  user at DONE as a decision point (accept the caveat vs. open a follow-up goal).** Gates are not
+  amended or softened by this call.
+- **G3 — gates stay immutable.** T5's follow-up commit states the "child directories are no longer
+  emitted" claim *together with* its measured exceptions. More accurate than iteration 1, not less
+  demanding.
+- **G4 — T1+T2 ship as ONE commit.** `main` never holds a knowingly-red tree; no weakened test, no
+  `--no-verify`, no amend of `e886939`.
+
 ## Next Actions
 
-- [ ] Iteration 2 Step 1: Architect plans from `1/gap-summary.md` → `2/plan.md` (C1 fix + accurate
-      docs; explicitly NOT W2).
-- [ ] Iteration 2 Step 2: Engineer fixes `inlineBigserial` anchoring + regression test;
-      Documentation Engineer corrects the absolute "never emitted" claims.
-- [ ] Iteration 2 Step 3: Test Engineer re-proves **all five** gates — 1, 2, 3 and 5 passed
-      iteration 1 but the C1 fix touches merged output, so Gate 1 and Gate 3 are at regression
-      risk; a Pass→Fail flip is a Critical regression.
-- [ ] Iteration 2 Step 4: Delivery Lead decides, with the clean-tree / green-suite /
-      no-unresolved-Critical hygiene checks.
+- [x] Iteration 2 Step 1: Architect → `2/plan.md` (5 tasks; found N1; swept the defect class).
+- [ ] **ITERATION 2 STEP 2 — RESUME HERE.** Engineer: plan **T1+T2** only — write the six §A.6
+      tests, prove them RED against `git show HEAD:internal/split/merge_table.go`, then implement
+      §A.2–A.4. Do not touch `README.md`, `AGENTS.md` or any doc comment (that is T3). Zero edits to
+      pre-existing tests.
+- [ ] Iteration 2 Step 2b: Documentation Engineer: **T3** — docs rewritten from §B.1's observed
+      table, including the N1 replay caveat.
+- [ ] Iteration 2 Step 3: Test Engineer: **T4** — re-produce **all five** gates from scratch. Gates
+      1 and 3 are at regression risk because the fix changes merged output; a Pass→Fail flip is a
+      Critical regression. Require the real-dump/live-DB proof of C1, not unit tests alone.
+- [ ] Iteration 2 Step 4: Delivery Lead decides, with the hygiene checks; **T5** = behavior commit +
+      record-correction commit, never an amend. Then present N1 and W2 to the user.
 
 ## Team
 
